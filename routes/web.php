@@ -1,0 +1,59 @@
+<?php
+
+use App\Http\Controllers\CompanyController;
+use App\Http\Controllers\ContactController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\JourneyEnrollmentController;
+use App\Http\Controllers\JourneyTemplateController;
+use App\Http\Controllers\NotificationController;
+use App\Http\Controllers\OrganizationSwitchController;
+use App\Http\Controllers\TaskController;
+use App\Http\Middleware\EnsureOrganizationSelected;
+use Illuminate\Support\Facades\Route;
+
+Route::inertia('/', 'welcome')->name('home');
+
+Route::middleware(['auth', 'verified'])->group(function (): void {
+    Route::post('/organization/switch', OrganizationSwitchController::class)->name('organizations.switch');
+
+    Route::middleware(EnsureOrganizationSelected::class)->group(function (): void {
+        Route::get('/dashboard', DashboardController::class)->name('dashboard');
+        Route::get('/notifications', [NotificationController::class, 'index'])->name('notifications.index');
+        Route::post('/notifications/{notification}/open', [NotificationController::class, 'open'])->name('notifications.open');
+        Route::post('/notifications/{notification}/read', [NotificationController::class, 'markRead'])->name('notifications.read');
+
+        Route::get('/tasks', [TaskController::class, 'index'])->name('tasks.index');
+        Route::get('/tasks/{task}', [TaskController::class, 'show'])->whereNumber('task')->name('tasks.show');
+        Route::get('/tasks/create', [TaskController::class, 'create'])->name('tasks.create');
+        Route::get('/tasks/{task}/edit', [TaskController::class, 'edit'])->whereNumber('task')->name('tasks.edit');
+        Route::post('/tasks', [TaskController::class, 'store'])->name('tasks.store');
+        Route::patch('/tasks/{task}', [TaskController::class, 'update'])->whereNumber('task')->name('tasks.update');
+        Route::post('/tasks/{task}/complete', [TaskController::class, 'complete'])->whereNumber('task')->name('tasks.complete');
+        Route::patch('/tasks/{task}/postpone', [TaskController::class, 'postpone'])->whereNumber('task')->name('tasks.postpone');
+        Route::post('/tasks/{task}/cancel', [TaskController::class, 'cancel'])->whereNumber('task')->name('tasks.cancel');
+
+        Route::get('/companies', [CompanyController::class, 'index'])->name('companies.index');
+        Route::get('/companies/create', [CompanyController::class, 'create'])->name('companies.create');
+        Route::post('/companies', [CompanyController::class, 'store'])->name('companies.store');
+        Route::get('/companies/{company}', [CompanyController::class, 'show'])->whereNumber('company')->name('companies.show');
+        Route::post('/companies/{company}/journeys', [JourneyEnrollmentController::class, 'store'])->whereNumber('company')->name('companies.journeys.store');
+        Route::get('/journeys', [JourneyTemplateController::class, 'index'])->name('journeys.index');
+        Route::get('/journeys/templates/create', [JourneyTemplateController::class, 'create'])->name('journeys.templates.create');
+        Route::post('/journeys/templates', [JourneyTemplateController::class, 'store'])->name('journeys.templates.store');
+        Route::get('/journeys/templates/{template}/edit', [JourneyTemplateController::class, 'edit'])->whereNumber('template')->name('journeys.templates.edit');
+        Route::patch('/journeys/templates/{template}', [JourneyTemplateController::class, 'update'])->whereNumber('template')->name('journeys.templates.update');
+        Route::patch('/journeys/settings', [JourneyTemplateController::class, 'updateSettings'])->name('journeys.settings.update');
+        Route::post('/journeys/enrollments/{enrollment}/pause', [JourneyEnrollmentController::class, 'pause'])->whereNumber('enrollment')->name('journeys.enrollments.pause');
+        Route::post('/journeys/enrollments/{enrollment}/resume', [JourneyEnrollmentController::class, 'resume'])->whereNumber('enrollment')->name('journeys.enrollments.resume');
+        Route::post('/journeys/enrollments/{enrollment}/cancel', [JourneyEnrollmentController::class, 'cancel'])->whereNumber('enrollment')->name('journeys.enrollments.cancel');
+        Route::patch('/companies/{company}/owner', [CompanyController::class, 'updateOwner'])->whereNumber('company')->name('companies.owner.update');
+        Route::post('/companies/{company}/activities', [CompanyController::class, 'storeActivity'])->whereNumber('company')->name('companies.activities.store');
+        Route::post('/companies/{company}/contacts', [CompanyController::class, 'attachContact'])->whereNumber('company')->name('companies.contacts.store');
+
+        Route::get('/contacts', [ContactController::class, 'index'])->name('contacts.index');
+        Route::get('/contacts/create', [ContactController::class, 'create'])->name('contacts.create');
+        Route::post('/contacts', [ContactController::class, 'store'])->name('contacts.store');
+    });
+});
+
+require __DIR__.'/settings.php';
