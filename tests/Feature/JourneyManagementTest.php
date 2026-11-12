@@ -19,6 +19,40 @@ it('persists organization-scoped journey templates and ordered steps', function 
         ->and(Schema::hasTable('journey_step_executions'))->toBeTrue();
 });
 
+it('creates reactivation and post-sale templates with their commercial triggers', function () {
+    $organization = Organization::factory()->create();
+    $manager = User::factory()->create();
+    $organization->users()->attach($manager, ['role' => 'manager']);
+    app(TenantContext::class)->set($organization);
+    $this->actingAs($manager)->withSession(['active_organization_id' => $organization->id]);
+
+    foreach ([
+        ['Reativação Comercial', 'reactivation', 'sales_inactivity'],
+        ['Pós-venda', 'post_sale', 'first_sale'],
+    ] as [$name, $type, $trigger]) {
+        $this->post(route('journeys.templates.store'), [
+            'name' => $name,
+            'description' => 'Modelo comercial configurável.',
+            'is_active' => true,
+            'is_default' => false,
+            'type' => $type,
+            'trigger_type' => $trigger,
+            'steps' => [[
+                'title' => 'Primeiro acompanhamento',
+                'description' => 'Contato comercial.',
+                'delay_days' => 1,
+                'task_title' => 'Acompanhar {company}',
+                'task_description' => null,
+                'task_type' => 'follow_up',
+                'task_priority' => 'normal',
+            ]],
+        ])->assertRedirect(route('journeys.index'));
+    }
+
+    expect(JourneyTemplate::query()->where('type', 'reactivation')->where('trigger_type', 'sales_inactivity')->exists())->toBeTrue()
+        ->and(JourneyTemplate::query()->where('type', 'post_sale')->where('trigger_type', 'first_sale')->exists())->toBeTrue();
+});
+
 it('enrolls a new prospect in the active default journey and creates its first task', function () {
     $this->travelTo('2026-11-11 15:00:00');
     $organization = Organization::factory()->create(['timezone' => 'America/Sao_Paulo']);

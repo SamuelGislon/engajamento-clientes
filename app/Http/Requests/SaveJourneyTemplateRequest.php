@@ -9,6 +9,22 @@ use Illuminate\Validation\Rule;
 
 class SaveJourneyTemplateRequest extends FormRequest
 {
+    protected function prepareForValidation(): void
+    {
+        $template = $this->route('template');
+        $type = $this->input('type', $template instanceof JourneyTemplate ? $template->type : 'prospecting');
+        $triggerType = match ($type) {
+            'post_sale' => 'first_sale',
+            'reactivation' => 'sales_inactivity',
+            default => (bool) $this->input('is_default') ? 'company_created' : 'manual',
+        };
+
+        $this->merge([
+            'type' => $type,
+            'trigger_type' => $this->input('trigger_type', $triggerType),
+        ]);
+    }
+
     /**
      * Determine if the user is authorized to make this request.
      */
@@ -29,6 +45,12 @@ class SaveJourneyTemplateRequest extends FormRequest
     {
         $template = $this->route('template');
         $hasEnrollments = $template instanceof JourneyTemplate && $template->enrollments()->exists();
+        $type = $this->input('type', 'prospecting');
+        $allowedTriggers = match ($type) {
+            'post_sale' => ['first_sale'],
+            'reactivation' => ['sales_inactivity'],
+            default => ['manual', 'company_created'],
+        };
 
         return [
             'name' => ['required', 'string', 'max:180', Rule::unique('journey_templates', 'name')
@@ -37,6 +59,8 @@ class SaveJourneyTemplateRequest extends FormRequest
             'description' => ['nullable', 'string', 'max:5000'],
             'is_active' => ['required', 'boolean'],
             'is_default' => ['required', 'boolean'],
+            'type' => ['required', Rule::in(['prospecting', 'post_sale', 'reactivation']), $hasEnrollments ? Rule::in([$template->type]) : 'string'],
+            'trigger_type' => ['required', $hasEnrollments ? Rule::in([$template->trigger_type]) : Rule::in($allowedTriggers)],
             'steps' => [$hasEnrollments ? 'prohibited' : 'required', 'array', 'min:1', 'max:20'],
             'steps.*.title' => ['required', 'string', 'max:180'],
             'steps.*.description' => ['nullable', 'string', 'max:2000'],

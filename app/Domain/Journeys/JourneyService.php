@@ -226,6 +226,9 @@ class JourneyService
                     ->where('origin', 'automatic')
                     ->whereIn('status', ['pending', 'in_progress', 'postponed'])
                     ->update(['status' => 'cancelled', 'updated_at' => now()]);
+                $locked->executions()
+                    ->where('status', 'active')
+                    ->update(['status' => 'cancelled', 'updated_at' => now()]);
             }
 
             return $locked->refresh();

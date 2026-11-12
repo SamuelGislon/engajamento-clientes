@@ -11,7 +11,18 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
+/**
+ * @property int|null $last_confirmed_sale_id
+ * @property string|null $last_confirmed_sale_at
+ * @property int|null $last_activity_id
+ * @property string|null $last_activity_at
+ * @property string|null $activities_max_occurred_at
+ * @property string|null $last_purchase_at
+ * @property string|null $volume_12_months
+ * @property int|null $purchase_count_12_months
+ */
 class Company extends Model
 {
     /** @use HasFactory<CompanyFactory> */
@@ -48,6 +59,30 @@ class Company extends Model
     public function tasks(): HasMany
     {
         return $this->hasMany(Task::class);
+    }
+
+    /** @return HasMany<Sale, $this> */
+    public function sales(): HasMany
+    {
+        return $this->hasMany(Sale::class);
+    }
+
+    /** @return HasOne<CustomerScore, $this> */
+    public function customerScore(): HasOne
+    {
+        return $this->hasOne(CustomerScore::class);
+    }
+
+    /** @return HasMany<CustomerScoreHistory, $this> */
+    public function customerScoreHistory(): HasMany
+    {
+        return $this->hasMany(CustomerScoreHistory::class)->latest('recorded_at');
+    }
+
+    /** @return HasMany<CommercialAlertOccurrence, $this> */
+    public function commercialAlertOccurrences(): HasMany
+    {
+        return $this->hasMany(CommercialAlertOccurrence::class);
     }
 
     /**

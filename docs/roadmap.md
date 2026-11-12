@@ -20,9 +20,12 @@
 
 ## Fase 3 — Inteligência comercial
 
-- [ ] Vendas e jornadas pós-venda.
-- [ ] Regras de inatividade, reativação e recomendações determinísticas.
-- [ ] Pontuação, faixas e indicadores.
+- [x] Vendas, histórico, filtros, agregados e jornada pós-venda configurável.
+- [x] Inatividade comercial e de relacionamento, cooldown idempotente e contatos recomendados.
+- [x] Classificação por pontuação, critérios manuais, histórico de faixas e filtros.
+- [x] Dashboard acionável e dados demonstrativos fictícios protegidos por ambiente.
+- [x] Integração de jornadas pós-venda e reativação com o motor da Fase 2.
+- [ ] Validar migrations e concorrência em PostgreSQL, worker Redis, Scheduler ativo, Mailpit e fluxo E2E.
 
 ## Fase 4 — Equipes e gestão
 

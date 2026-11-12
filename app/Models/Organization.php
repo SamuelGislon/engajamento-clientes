@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /** @property-read OrganizationMembership $pivot */
 class Organization extends Model
@@ -46,6 +47,18 @@ class Organization extends Model
     public function activities(): HasMany
     {
         return $this->hasMany(Activity::class);
+    }
+
+    /** @return HasMany<Sale, $this> */
+    public function sales(): HasMany
+    {
+        return $this->hasMany(Sale::class);
+    }
+
+    /** @return HasOne<CommercialSetting, $this> */
+    public function commercialSetting(): HasOne
+    {
+        return $this->hasOne(CommercialSetting::class);
     }
 
     /** @return HasMany<JourneyTemplate, $this> */

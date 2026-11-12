@@ -2,9 +2,12 @@ import { Link, router, usePage } from '@inertiajs/react';
 import {
     Bell,
     Building2,
+    CircleDollarSign,
+    Gauge,
     LayoutGrid,
     ListTodo,
     Route,
+    Settings2,
     UsersRound,
 } from 'lucide-react';
 import { index as companiesIndex } from '@/actions/App/Http/Controllers/CompanyController';
@@ -13,6 +16,9 @@ import OrganizationSwitchController from '@/actions/App/Http/Controllers/Organiz
 import { index as tasksIndex } from '@/actions/App/Http/Controllers/TaskController';
 import { index as journeysIndex } from '@/actions/App/Http/Controllers/JourneyTemplateController';
 import { index as notificationsIndex } from '@/actions/App/Http/Controllers/NotificationController';
+import { index as salesIndex } from '@/actions/App/Http/Controllers/SaleController';
+import { edit as commercialSettings } from '@/actions/App/Http/Controllers/CommercialSettingsController';
+import { index as classificationIndex } from '@/actions/App/Http/Controllers/CustomerScoreController';
 import AppLogo from '@/components/app-logo';
 import { NavMain } from '@/components/nav-main';
 import { NavUser } from '@/components/nav-user';
@@ -44,6 +50,12 @@ const mainNavItems: NavItem[] = [
         href: contactsIndex.url(),
         icon: UsersRound,
     },
+    { title: 'Vendas', href: salesIndex.url(), icon: CircleDollarSign },
+    {
+        title: 'Classificação comercial',
+        href: classificationIndex.url(),
+        icon: Gauge,
+    },
     { title: 'Atividades', href: tasksIndex.url(), icon: ListTodo },
     { title: 'Jornadas', href: journeysIndex.url(), icon: Route },
     { title: 'Notificações', href: notificationsIndex.url(), icon: Bell },
@@ -51,6 +63,19 @@ const mainNavItems: NavItem[] = [
 
 export function AppSidebar() {
     const { activeOrganization, organizations } = usePage().props;
+    const canManageOrganization = ['owner', 'admin', 'manager'].includes(
+        activeOrganization?.role ?? '',
+    );
+    const navItems = canManageOrganization
+        ? [
+              ...mainNavItems,
+              {
+                  title: 'Configurações comerciais',
+                  href: commercialSettings.url(),
+                  icon: Settings2,
+              },
+          ]
+        : mainNavItems;
 
     return (
         <Sidebar collapsible="icon" variant="inset">
@@ -101,7 +126,7 @@ export function AppSidebar() {
             </SidebarHeader>
 
             <SidebarContent>
-                <NavMain items={mainNavItems} />
+                <NavMain items={navItems} />
             </SidebarContent>
 
             <SidebarFooter>

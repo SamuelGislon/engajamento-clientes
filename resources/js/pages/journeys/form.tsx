@@ -24,6 +24,7 @@ type Template = {
     id: number;
     name: string;
     description: string | null;
+    type: 'prospecting' | 'post_sale' | 'reactivation';
     is_default: boolean;
     is_active: boolean;
     steps: (Step & { id: number })[];
@@ -48,6 +49,7 @@ export default function JourneyForm({
     const form = useForm({
         name: template?.name ?? '',
         description: template?.description ?? '',
+        type: template?.type ?? 'prospecting',
         is_active: template?.is_active ?? true,
         is_default: template?.is_default ?? false,
         steps: template?.steps.map(({ id: _id, ...step }) => step) ?? [
@@ -127,6 +129,37 @@ export default function JourneyForm({
                             rows={3}
                             className="rounded-md border border-input bg-background px-3 py-2 text-sm"
                         />
+                    </Field>
+                    <Field label="Tipo de jornada" error={form.errors.type}>
+                        <select
+                            value={form.data.type}
+                            onChange={(event) => {
+                                const type = event.target
+                                    .value as typeof form.data.type;
+                                form.setData((current) => ({
+                                    ...current,
+                                    type,
+                                    is_default:
+                                        type === 'prospecting' &&
+                                        current.is_default,
+                                }));
+                            }}
+                            disabled={Boolean(template && !canEditSteps)}
+                            className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                        >
+                            <option value="prospecting">Prospecção</option>
+                            <option value="post_sale">Pós-venda</option>
+                            <option value="reactivation">
+                                Reativação comercial
+                            </option>
+                        </select>
+                        <span className="text-xs text-muted-foreground">
+                            {form.data.type === 'post_sale'
+                                ? 'Gatilho: primeira venda confirmada.'
+                                : form.data.type === 'reactivation'
+                                  ? 'Gatilho: cliente ultrapassa o intervalo sem compras.'
+                                  : 'Jornada iniciada manualmente ou no cadastro do prospecto.'}
+                        </span>
                     </Field>
                     <div className="flex flex-wrap gap-x-6 gap-y-3 text-sm">
                         <label className="flex items-center gap-2">
