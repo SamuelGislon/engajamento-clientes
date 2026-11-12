@@ -18,9 +18,13 @@ class JourneyTemplateController extends Controller
     public function index(Request $request): Response
     {
         Gate::authorize('viewAny', JourneyTemplate::class);
+        $user = $request->user();
         $templates = JourneyTemplate::query()
             ->withCount('steps')
-            ->withCount(['enrollments as active_enrollments_count' => fn ($query) => $query->whereIn('status', ['active', 'paused'])])
+            ->withCount(['enrollments as active_enrollments_count' => fn ($query) => $query
+                ->whereIn('status', ['active', 'paused'])
+                ->whereHas('company', fn ($companies) => $companies->visibleTo($user))
+                ->when($user->roleIn(app(TenantContext::class)->id()) === 'salesperson', fn ($enrollments) => $enrollments->where('assigned_to', $user->id))])
             ->orderByDesc('is_default')
             ->orderBy('name')
             ->paginate(12)
@@ -29,7 +33,7 @@ class JourneyTemplateController extends Controller
         return Inertia::render('journeys/index', [
             'templates' => $templates,
             'autoEnrollDefaultJourney' => app(TenantContext::class)->organization()->auto_enroll_default_journey,
-            'canManage' => $request->user()->can('create', JourneyTemplate::class),
+            'canManage' => $user->can('create', JourneyTemplate::class),
         ]);
     }
 

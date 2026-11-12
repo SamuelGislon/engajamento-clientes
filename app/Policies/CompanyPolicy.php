@@ -2,6 +2,7 @@
 
 namespace App\Policies;
 
+use App\Domain\Teams\CommercialAccessScope;
 use App\Domain\Tenancy\TenantContext;
 use App\Models\Company;
 use App\Models\User;
@@ -15,9 +16,7 @@ class CompanyPolicy
 
     public function view(User $user, Company $company): bool
     {
-        $role = $user->roleIn(app(TenantContext::class)->id());
-
-        return $role !== null && ($role !== 'salesperson' || $company->owner_user_id === $user->id);
+        return app(CommercialAccessScope::class)->canViewCompany($user, $company, app(TenantContext::class)->id());
     }
 
     public function create(User $user): bool

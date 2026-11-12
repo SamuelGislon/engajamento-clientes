@@ -27,7 +27,7 @@ class Organization extends Model
     {
         return $this->belongsToMany(User::class)
             ->using(OrganizationMembership::class)
-            ->withPivot('role')
+            ->withPivot(['role', 'is_active'])
             ->withTimestamps();
     }
 
@@ -35,6 +35,12 @@ class Organization extends Model
     public function companies(): HasMany
     {
         return $this->hasMany(Company::class);
+    }
+
+    /** @return HasMany<Team, $this> */
+    public function teams(): HasMany
+    {
+        return $this->hasMany(Team::class);
     }
 
     /** @return HasMany<Contact, $this> */

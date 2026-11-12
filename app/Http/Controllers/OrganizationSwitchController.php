@@ -14,7 +14,8 @@ class OrganizationSwitchController
             'organization_id' => [
                 'required',
                 Rule::exists('organization_user', 'organization_id')
-                    ->where('user_id', $request->user()->id),
+                    ->where('user_id', $request->user()->id)
+                    ->where('is_active', true),
             ],
         ]);
 

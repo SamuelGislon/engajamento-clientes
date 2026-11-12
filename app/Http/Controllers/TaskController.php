@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Domain\Journeys\JourneyService;
 use App\Domain\Tasks\TaskAssignmentNotifier;
+use App\Domain\Teams\CommercialAccessScope;
 use App\Domain\Tenancy\TenantContext;
 use App\Http\Requests\CompleteTaskRequest;
 use App\Http\Requests\PostponeTaskRequest;
@@ -32,12 +33,14 @@ class TaskController extends Controller
             ->with(['contacts:id,name'])
             ->orderBy('name')
             ->limit(100)
-            ->get(['id', 'name', 'owner_user_id']);
+            ->get(['id', 'name', 'owner_user_id', 'team_id']);
+        $members = $this->assignableMembers($request->user());
 
         return Inertia::render('tasks/form', [
             'task' => null,
             'companies' => $companies,
-            'members' => $this->assignableMembers($request->user()),
+            'members' => $members,
+            'restrictAssigneesToCompanyTeam' => $request->user()->roleIn(app(TenantContext::class)->id()) === 'manager',
             'canChangeRelations' => true,
         ]);
     }
@@ -50,12 +53,21 @@ class TaskController extends Controller
             ->with(['contacts:id,name'])
             ->orderBy('name')
             ->limit(100)
-            ->get(['id', 'name', 'owner_user_id']);
+            ->get(['id', 'name', 'owner_user_id', 'team_id']);
+        $members = $this->assignableMembers($request->user());
+        if (! $members->contains(fn (array $member): bool => $member['id'] === $task->assigned_to)) {
+            $organization = app(TenantContext::class)->organization();
+            $currentAssignee = $organization?->users()->where('users.id', $task->assigned_to)->first(['users.id', 'users.name']);
+            if ($currentAssignee !== null) {
+                $members->push(['id' => $currentAssignee->id, 'name' => $currentAssignee->name, 'team_ids' => []]);
+            }
+        }
 
         return Inertia::render('tasks/form', [
             'task' => $task->load(['company:id,name', 'contact:id,name', 'assignee:id,name']),
             'companies' => $companies,
-            'members' => $this->assignableMembers($request->user()),
+            'members' => $members,
+            'restrictAssigneesToCompanyTeam' => $request->user()->roleIn(app(TenantContext::class)->id()) === 'manager',
             'canChangeRelations' => $task->origin === 'manual',
         ]);
     }
@@ -198,7 +210,7 @@ class TaskController extends Controller
         return redirect()->route('tasks.index')->with('success', 'Atividade cancelada.');
     }
 
-    /** @return Collection<int, User> */
+    /** @return Collection<int, array{id: int, name: string, team_ids: array<int, int>}> */
     private function assignableMembers(User $user): Collection
     {
         $organization = app(TenantContext::class)->organization();
@@ -207,12 +219,29 @@ class TaskController extends Controller
             return collect();
         }
 
-        $members = $organization->users()->orderBy('name');
+        $members = $organization->users()
+            ->where('organization_user.is_active', true)
+            ->whereIn('organization_user.role', ['owner', 'admin', 'manager', 'salesperson']);
 
-        if ($user->roleIn($organization->id) === 'salesperson') {
+        if ($user->roleIn($organization->id) === 'manager') {
+            $members->whereIn('users.id', app(CommercialAccessScope::class)->managedSellerIds($user, $organization->id));
+        } elseif ($user->roleIn($organization->id) === 'salesperson') {
             $members->where('users.id', $user->id);
         }
 
-        return $members->limit(200)->get(['users.id', 'users.name']);
+        $members = $members->limit(200)->get(['users.id', 'users.name']);
+        $memberTeamIds = DB::table('team_memberships')
+            ->where('organization_id', $organization->id)
+            ->whereIn('user_id', $members->modelKeys())
+            ->where('is_active', true)
+            ->get(['user_id', 'team_id'])
+            ->groupBy('user_id');
+
+        return $members->map(fn (User $member): array => [
+            'id' => $member->id,
+            'name' => $member->name,
+            'team_ids' => $memberTeamIds->get($member->id, collect())
+                ->pluck('team_id')->map(fn ($teamId): int => (int) $teamId)->values()->all(),
+        ]);
     }
 }

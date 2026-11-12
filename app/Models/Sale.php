@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\DB;
 
 /**
  * @property CarbonImmutable $sold_at
@@ -23,7 +24,7 @@ class Sale extends Model
     use BelongsToOrganization, HasFactory;
 
     protected $fillable = [
-        'company_id', 'seller_id', 'created_by', 'external_id', 'description',
+        'company_id', 'seller_id', 'team_id_at_sale', 'created_by', 'external_id', 'description',
         'amount', 'currency', 'sold_at', 'status', 'notes', 'cancelled_at', 'cancelled_by',
     ];
 
@@ -54,6 +55,12 @@ class Sale extends Model
         return $this->belongsTo(User::class, 'seller_id');
     }
 
+    /** @return BelongsTo<Team, $this> */
+    public function teamAtSale(): BelongsTo
+    {
+        return $this->belongsTo(Team::class, 'team_id_at_sale');
+    }
+
     /** @return BelongsTo<User, $this> */
     public function creator(): BelongsTo
     {
@@ -72,10 +79,43 @@ class Sale extends Model
      */
     public function scopeVisibleTo(Builder $query, User $user): Builder
     {
-        if ($user->roleIn(app(TenantContext::class)->id()) === 'salesperson') {
-            $query->whereHas('company', fn (Builder $companies) => $companies->where('owner_user_id', $user->id));
+        $organizationId = app(TenantContext::class)->id();
+        $role = $user->roleIn($organizationId);
+
+        if ($organizationId === null || $role === null) {
+            return $query->whereRaw('1 = 0');
         }
 
-        return $query;
+        if (in_array($role, ['owner', 'admin'], true)) {
+            return $query;
+        }
+
+        if ($role === 'salesperson') {
+            return $query->where(fn (Builder $sales) => $sales
+                ->where('seller_id', $user->id)
+                ->orWhereHas('company', fn (Builder $companies) => $companies->visibleTo($user)));
+        }
+
+        if ($role !== 'manager') {
+            return $query->whereRaw('1 = 0');
+        }
+
+        $managedTeamIds = DB::table('team_memberships')
+            ->select('team_id')
+            ->where('organization_id', $organizationId)
+            ->where('user_id', $user->id)
+            ->where('role', 'manager')
+            ->where('is_active', true)
+            ->whereExists(fn ($teams) => $teams->selectRaw('1')
+                ->from('teams')
+                ->whereColumn('teams.id', 'team_memberships.team_id')
+                ->whereColumn('teams.organization_id', 'team_memberships.organization_id')
+                ->where('teams.status', 'active'));
+
+        return $query->where(fn (Builder $sales) => $sales
+            ->whereIn('team_id_at_sale', $managedTeamIds)
+            ->orWhere(fn (Builder $legacySales) => $legacySales
+                ->whereNull('team_id_at_sale')
+                ->whereHas('company', fn (Builder $companies) => $companies->visibleTo($user))));
     }
 }

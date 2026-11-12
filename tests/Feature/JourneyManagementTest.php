@@ -107,8 +107,10 @@ it('starts an existing prospect in a selected journey manually', function () {
     $manager = User::factory()->create();
     $organization->users()->attach($manager, ['role' => 'manager']);
     app(TenantContext::class)->set($organization);
+    $team = createManagedTeam($organization, $manager);
     $company = Company::factory()->create([
         'organization_id' => $organization->id,
+        'team_id' => $team->id,
         'relationship_status' => 'prospect',
     ]);
     $templateId = DB::table('journey_templates')->insertGetId([
@@ -208,9 +210,11 @@ it('cancels open automatic tasks and retains manual tasks and execution history'
     $manager = User::factory()->create();
     $organization->users()->attach($manager, ['role' => 'manager']);
     app(TenantContext::class)->set($organization);
+    $team = createManagedTeam($organization, $manager);
     $template = app(JourneyService::class)->ensureDefaultTemplate($organization);
     $company = Company::factory()->create([
         'organization_id' => $organization->id,
+        'team_id' => $team->id,
         'relationship_status' => 'prospect',
     ]);
     $enrollment = app(JourneyService::class)->enroll($company, $template, $manager);
@@ -315,9 +319,11 @@ it('includes active journeys and tasks on the authorized company page', function
     $manager = User::factory()->create();
     $organization->users()->attach($manager, ['role' => 'manager']);
     app(TenantContext::class)->set($organization);
+    $team = createManagedTeam($organization, $manager);
     $template = app(JourneyService::class)->ensureDefaultTemplate($organization);
     $company = Company::factory()->create([
         'organization_id' => $organization->id,
+        'team_id' => $team->id,
         'relationship_status' => 'prospect',
     ]);
     $enrollment = app(JourneyService::class)->enroll($company, $template, $manager);
@@ -346,9 +352,13 @@ it('reassigns open automatic journey tasks when a company owner changes', functi
     $organization->users()->attach($previousOwner, ['role' => 'salesperson']);
     $organization->users()->attach($newOwner, ['role' => 'salesperson']);
     app(TenantContext::class)->set($organization);
+    $team = createManagedTeam($organization, $manager);
+    assignTeamMember($organization, $team, $previousOwner, 'salesperson');
+    assignTeamMember($organization, $team, $newOwner, 'salesperson');
     Mail::fake();
     $company = Company::factory()->ownedBy($previousOwner)->create([
         'organization_id' => $organization->id,
+        'team_id' => $team->id,
         'relationship_status' => 'prospect',
     ]);
     $template = app(JourneyService::class)->ensureDefaultTemplate($organization);
@@ -380,11 +390,16 @@ it('does not auto-enroll prospects when the organization turns the setting off',
     $manager = User::factory()->create();
     $organization->users()->attach($manager, ['role' => 'manager']);
     app(TenantContext::class)->set($organization);
+    $team = createManagedTeam($organization, $manager);
     app(JourneyService::class)->ensureDefaultTemplate($organization);
 
     $this->actingAs($manager)
         ->withSession(['active_organization_id' => $organization->id])
-        ->post(route('companies.store'), ['name' => 'Escritório Sem Jornada', 'relationship_status' => 'prospect']);
+        ->post(route('companies.store'), [
+            'name' => 'Escritório Sem Jornada',
+            'relationship_status' => 'prospect',
+            'team_id' => $team->id,
+        ]);
 
     $company = Company::query()->where('name', 'Escritório Sem Jornada')->firstOrFail();
     expect(DB::table('journey_enrollments')->where('company_id', $company->id)->count())->toBe(0)
@@ -396,8 +411,10 @@ it('notifies once when the full journey is completed', function () {
     $manager = User::factory()->create();
     $organization->users()->attach($manager, ['role' => 'manager']);
     app(TenantContext::class)->set($organization);
+    $team = createManagedTeam($organization, $manager);
     $company = Company::factory()->create([
         'organization_id' => $organization->id,
+        'team_id' => $team->id,
         'relationship_status' => 'prospect',
     ]);
     $template = app(JourneyService::class)->ensureDefaultTemplate($organization);

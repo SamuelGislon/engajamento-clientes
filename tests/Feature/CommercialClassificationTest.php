@@ -15,13 +15,18 @@ it('shows an incomplete commercial classification only for the salesperson portf
     $organization->users()->attach($otherSeller, ['role' => 'salesperson']);
     $organization->users()->attach($manager, ['role' => 'manager']);
     app(TenantContext::class)->set($organization);
+    $team = createManagedTeam($organization, $manager);
+    assignTeamMember($organization, $team, $seller, 'salesperson');
+    assignTeamMember($organization, $team, $otherSeller, 'salesperson');
     $company = Company::factory()->ownedBy($seller)->create([
         'organization_id' => $organization->id,
+        'team_id' => $team->id,
         'name' => 'Escritório Horizonte',
         'relationship_status' => 'customer',
     ]);
     $otherCompany = Company::factory()->ownedBy($otherSeller)->create([
         'organization_id' => $organization->id,
+        'team_id' => $team->id,
         'name' => 'Escritório de outra carteira',
         'relationship_status' => 'customer',
     ]);

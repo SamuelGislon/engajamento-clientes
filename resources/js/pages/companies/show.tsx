@@ -40,7 +40,18 @@ import { Label } from '@/components/ui/label';
 import { Spinner } from '@/components/ui/spinner';
 import type { BreadcrumbItem } from '@/types';
 
-type Member = { id: number; name: string };
+type Member = { id: number; name: string; team_ids: number[] };
+type TeamOption = { id: number; name: string };
+type AssignmentChange = {
+    id: number;
+    previousOwner: { id: number; name: string } | null;
+    newOwner: { id: number; name: string } | null;
+    previousTeam: TeamOption | null;
+    newTeam: TeamOption | null;
+    actor: { id: number; name: string };
+    reason: string | null;
+    changed_at: string;
+};
 type Contact = {
     id: number;
     name: string;
@@ -76,7 +87,9 @@ type Company = {
     relationship_status: string;
     lead_source: string | null;
     owner_user_id: number | null;
+    team_id: number | null;
     owner: { id: number; name: string } | null;
+    team: TeamOption | null;
     notes: string | null;
     contacts: Contact[];
     activities: Activity[];
@@ -219,6 +232,11 @@ export default function CompanyShow({
     company,
     attachableContacts,
     members,
+    saleSellers,
+    teams,
+    canManageAssignment,
+    canClearTeam,
+    assignmentHistory,
     journeys,
     availableJourneys,
     tasks,
@@ -231,6 +249,11 @@ export default function CompanyShow({
     company: Company;
     attachableContacts: AttachableContact[];
     members: Member[];
+    saleSellers: { id: number; name: string }[];
+    teams: TeamOption[];
+    canManageAssignment: boolean;
+    canClearTeam: boolean;
+    assignmentHistory: AssignmentChange[];
     journeys: Journey[];
     availableJourneys: JourneyOption[];
     tasks: TaskItem[];
@@ -241,17 +264,19 @@ export default function CompanyShow({
     scoreHistory: ScoreHistory[];
 }) {
     const [owner, setOwner] = useState(String(company.owner_user_id ?? ''));
+    const [team, setTeam] = useState(String(company.team_id ?? ''));
+    const [assignmentReason, setAssignmentReason] = useState('');
     const [newRoles, setNewRoles] = useState<string[]>([]);
     const activityForm = useForm({
         contact_id: '',
         type: 'call',
-        occurred_at: localDateTime(),
+        occurred_at: localDateTime(salesTimezone),
         description: '',
         result: '',
         next_action: '',
     });
     const saleForm = useForm({
-        seller_id: String(company.owner_user_id ?? members[0]?.id ?? ''),
+        seller_id: String(company.owner_user_id ?? saleSellers[0]?.id ?? ''),
         description: '',
         amount: '',
         currency: 'BRL',
@@ -306,7 +331,9 @@ export default function CompanyShow({
     function saveOwner(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
         router.patch(updateOwner.url(company.id), {
-            owner_user_id: Number(owner),
+            owner_user_id: owner ? Number(owner) : null,
+            team_id: team ? Number(team) : null,
+            reason: assignmentReason || null,
         });
     }
 
@@ -392,37 +419,139 @@ export default function CompanyShow({
                                 </div>
                             </div>
                         </div>
-                        <form
-                            onSubmit={saveOwner}
-                            className="flex w-full flex-col gap-2 sm:flex-row xl:w-auto"
-                        >
-                            <select
-                                aria-label="Vendedor responsável"
-                                value={owner}
-                                onChange={(event) =>
-                                    setOwner(event.target.value)
-                                }
-                                className="h-10 min-w-56 rounded-md border border-input bg-background px-3 text-sm"
+                        {canManageAssignment && (
+                            <form
+                                onSubmit={saveOwner}
+                                className="flex w-full flex-col gap-2 xl:w-[34rem]"
                             >
-                                <option value="">
-                                    Sem responsável definido
-                                </option>
-                                {members.map((member) => (
-                                    <option key={member.id} value={member.id}>
-                                        {member.name}
-                                    </option>
-                                ))}
-                            </select>
-                            <Button
-                                type="submit"
-                                variant="outline"
-                                className="h-10 rounded-lg"
-                            >
-                                Atualizar responsável
-                            </Button>
-                        </form>
+                                <div className="grid gap-2 sm:grid-cols-2">
+                                    <select
+                                        aria-label="Equipe principal"
+                                        value={team}
+                                        onChange={(event) => {
+                                            setTeam(event.target.value);
+                                            const selectedTeamId = Number(
+                                                event.target.value,
+                                            );
+                                            if (
+                                                owner &&
+                                                !members
+                                                    .find(
+                                                        (member) =>
+                                                            member.id ===
+                                                            Number(owner),
+                                                    )
+                                                    ?.team_ids.includes(
+                                                        selectedTeamId,
+                                                    )
+                                            ) {
+                                                setOwner('');
+                                            }
+                                        }}
+                                        className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm"
+                                    >
+                                        {canClearTeam && (
+                                            <option value="">Sem equipe</option>
+                                        )}
+                                        {teams.map((item) => (
+                                            <option
+                                                key={item.id}
+                                                value={item.id}
+                                            >
+                                                {item.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <select
+                                        aria-label="Vendedor responsável"
+                                        value={owner}
+                                        onChange={(event) =>
+                                            setOwner(event.target.value)
+                                        }
+                                        className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm"
+                                    >
+                                        <option value="">
+                                            Sem responsável definido
+                                        </option>
+                                        {members
+                                            .filter(
+                                                (member) =>
+                                                    !team ||
+                                                    member.team_ids.includes(
+                                                        Number(team),
+                                                    ),
+                                            )
+                                            .map((member) => (
+                                                <option
+                                                    key={member.id}
+                                                    value={member.id}
+                                                >
+                                                    {member.name}
+                                                </option>
+                                            ))}
+                                    </select>
+                                </div>
+                                <div className="flex gap-2">
+                                    <Input
+                                        aria-label="Justificativa da transferência"
+                                        value={assignmentReason}
+                                        onChange={(event) =>
+                                            setAssignmentReason(
+                                                event.target.value,
+                                            )
+                                        }
+                                        placeholder="Justificativa opcional da alteração"
+                                        maxLength={500}
+                                    />
+                                    <Button
+                                        type="submit"
+                                        variant="outline"
+                                        className="h-10 shrink-0 rounded-lg"
+                                    >
+                                        Atualizar carteira
+                                    </Button>
+                                </div>
+                            </form>
+                        )}
                     </div>
                 </section>
+
+                {assignmentHistory.length > 0 && (
+                    <section className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm">
+                        <h2 className="font-semibold">Histórico da carteira</h2>
+                        <ol className="mt-4 divide-y divide-border/60">
+                            {assignmentHistory.map((change) => (
+                                <li
+                                    key={change.id}
+                                    className="py-3 first:pt-0 last:pb-0"
+                                >
+                                    <p className="text-sm">
+                                        {change.previousOwner?.name ??
+                                            'Sem responsável'}{' '}
+                                        →{' '}
+                                        {change.newOwner?.name ??
+                                            'Sem responsável'}
+                                        {' · '}
+                                        {change.previousTeam?.name ??
+                                            'Sem equipe'}{' '}
+                                        → {change.newTeam?.name ?? 'Sem equipe'}
+                                    </p>
+                                    <p className="mt-1 text-xs text-muted-foreground">
+                                        Alterado por {change.actor.name} em{' '}
+                                        {displayDate(
+                                            change.changed_at,
+                                            true,
+                                            salesTimezone,
+                                        )}
+                                        {change.reason
+                                            ? ` · ${change.reason}`
+                                            : ''}
+                                    </p>
+                                </li>
+                            ))}
+                        </ol>
+                    </section>
+                )}
 
                 <section className="overflow-hidden rounded-2xl border border-border/70 bg-card">
                     <div className="flex flex-col gap-4 border-b border-border/70 px-5 py-5 sm:flex-row sm:items-center sm:justify-between md:px-6">
@@ -456,7 +585,7 @@ export default function CompanyShow({
                                         }
                                         className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                                     >
-                                        {members.map((member) => (
+                                        {saleSellers.map((member) => (
                                             <option
                                                 key={member.id}
                                                 value={member.id}

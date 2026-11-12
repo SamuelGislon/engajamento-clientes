@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Domain\Teams\CommercialAccessScope;
 use App\Domain\Tenancy\TenantContext;
 use App\Models\Concerns\BelongsToOrganization;
 use Database\Factories\CompanyFactory;
@@ -31,13 +32,25 @@ class Company extends Model
     protected $fillable = [
         'name', 'trade_name', 'legal_name', 'tax_id', 'segment', 'phone', 'email',
         'website', 'city', 'state', 'address', 'relationship_status', 'lead_source',
-        'owner_user_id', 'notes',
+        'owner_user_id', 'team_id', 'notes',
     ];
 
     /** @return BelongsTo<User, $this> */
     public function owner(): BelongsTo
     {
         return $this->belongsTo(User::class, 'owner_user_id');
+    }
+
+    /** @return BelongsTo<Team, $this> */
+    public function team(): BelongsTo
+    {
+        return $this->belongsTo(Team::class);
+    }
+
+    /** @return HasMany<CompanyAssignmentHistory, $this> */
+    public function assignmentHistory(): HasMany
+    {
+        return $this->hasMany(CompanyAssignmentHistory::class)->latest('changed_at');
     }
 
     /** @return BelongsToMany<Contact, $this, CompanyContact, 'pivot'> */
@@ -59,6 +72,12 @@ class Company extends Model
     public function tasks(): HasMany
     {
         return $this->hasMany(Task::class);
+    }
+
+    /** @return HasMany<JourneyEnrollment, $this> */
+    public function journeyEnrollments(): HasMany
+    {
+        return $this->hasMany(JourneyEnrollment::class);
     }
 
     /** @return HasMany<Sale, $this> */
@@ -91,10 +110,6 @@ class Company extends Model
      */
     public function scopeVisibleTo(Builder $query, User $user): Builder
     {
-        if ($user->roleIn(app(TenantContext::class)->id()) === 'salesperson') {
-            $query->where('owner_user_id', $user->id);
-        }
-
-        return $query;
+        return app(CommercialAccessScope::class)->applyCompanies($query, $user, app(TenantContext::class)->id());
     }
 }

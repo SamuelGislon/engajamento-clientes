@@ -1,7 +1,9 @@
 import { Link, router, usePage } from '@inertiajs/react';
 import {
     Bell,
+    ArrowRightLeft,
     Building2,
+    ChartNoAxesCombined,
     CircleDollarSign,
     Gauge,
     LayoutGrid,
@@ -19,6 +21,10 @@ import { index as notificationsIndex } from '@/actions/App/Http/Controllers/Noti
 import { index as salesIndex } from '@/actions/App/Http/Controllers/SaleController';
 import { edit as commercialSettings } from '@/actions/App/Http/Controllers/CommercialSettingsController';
 import { index as classificationIndex } from '@/actions/App/Http/Controllers/CustomerScoreController';
+import { index as teamsIndex } from '@/actions/App/Http/Controllers/TeamController';
+import { index as organizationUsersIndex } from '@/actions/App/Http/Controllers/OrganizationInvitationController';
+import { index as companyPortfolioIndex } from '@/actions/App/Http/Controllers/CompanyPortfolioController';
+import CommercialReportController from '@/actions/App/Http/Controllers/CommercialReportController';
 import AppLogo from '@/components/app-logo';
 import { NavMain } from '@/components/nav-main';
 import { NavUser } from '@/components/nav-user';
@@ -59,11 +65,19 @@ const mainNavItems: NavItem[] = [
     { title: 'Atividades', href: tasksIndex.url(), icon: ListTodo },
     { title: 'Jornadas', href: journeysIndex.url(), icon: Route },
     { title: 'Notificações', href: notificationsIndex.url(), icon: Bell },
+    {
+        title: 'Relatórios',
+        href: CommercialReportController.url(),
+        icon: ChartNoAxesCombined,
+    },
 ];
 
 export function AppSidebar() {
     const { activeOrganization, organizations } = usePage().props;
     const canManageOrganization = ['owner', 'admin', 'manager'].includes(
+        activeOrganization?.role ?? '',
+    );
+    const canManageMembers = ['owner', 'admin'].includes(
         activeOrganization?.role ?? '',
     );
     const navItems = canManageOrganization
@@ -74,6 +88,25 @@ export function AppSidebar() {
                   href: commercialSettings.url(),
                   icon: Settings2,
               },
+              { title: 'Equipes', href: teamsIndex.url(), icon: UsersRound },
+              ...(canManageMembers
+                  ? [
+                        {
+                            title: 'Usuários',
+                            href: organizationUsersIndex.url(),
+                            icon: UsersRound,
+                        },
+                    ]
+                  : []),
+              ...(canManageMembers
+                  ? [
+                        {
+                            title: 'Carteiras',
+                            href: companyPortfolioIndex.url(),
+                            icon: ArrowRightLeft,
+                        },
+                    ]
+                  : []),
           ]
         : mainNavItems;
 

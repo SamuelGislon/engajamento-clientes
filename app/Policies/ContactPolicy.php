@@ -15,11 +15,8 @@ class ContactPolicy
 
     public function view(User $user, Contact $contact): bool
     {
-        $role = $user->roleIn(app(TenantContext::class)->id());
-
-        return $role !== null && ($role !== 'salesperson' || $contact->companies()
-            ->where('companies.owner_user_id', $user->id)
-            ->exists());
+        return $this->viewAny($user)
+            && Contact::query()->visibleTo($user)->whereKey($contact->id)->exists();
     }
 
     public function create(User $user): bool

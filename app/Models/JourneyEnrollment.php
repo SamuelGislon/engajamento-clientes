@@ -2,9 +2,11 @@
 
 namespace App\Models;
 
+use App\Domain\Tenancy\TenantContext;
 use App\Models\Concerns\BelongsToOrganization;
 use Carbon\CarbonImmutable;
 use Database\Factories\JourneyEnrollmentFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -65,5 +67,27 @@ class JourneyEnrollment extends Model
     public function tasks(): HasMany
     {
         return $this->hasMany(Task::class);
+    }
+
+    /**
+     * @param  Builder<JourneyEnrollment>  $query
+     * @return Builder<JourneyEnrollment>
+     */
+    public function scopeVisibleTo(Builder $query, User $user): Builder
+    {
+        $organizationId = app(TenantContext::class)->id();
+        $role = $user->roleIn($organizationId);
+
+        if ($organizationId === null || $role === null) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        if (in_array($role, ['owner', 'admin'], true)) {
+            return $query;
+        }
+
+        return $query->whereHas('company', fn (Builder $companies) => $companies->visibleTo($user))
+            ->when($role === 'salesperson', fn (Builder $enrollments) => $enrollments->where('assigned_to', $user->id))
+            ->when($role !== 'manager' && $role !== 'salesperson', fn (Builder $enrollments) => $enrollments->whereRaw('1 = 0'));
     }
 }

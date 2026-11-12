@@ -21,13 +21,8 @@ class JourneyEnrollmentPolicy
      */
     public function view(User $user, JourneyEnrollment $journeyEnrollment): bool
     {
-        if (! $this->viewAny($user)) {
-            return false;
-        }
-
-        return $user->roleIn(app(TenantContext::class)->id()) !== 'salesperson'
-            || ($journeyEnrollment->assigned_to === $user->id
-                && $journeyEnrollment->company?->owner_user_id === $user->id);
+        return $this->viewAny($user)
+            && JourneyEnrollment::query()->visibleTo($user)->whereKey($journeyEnrollment->id)->exists();
     }
 
     /**

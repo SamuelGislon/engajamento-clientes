@@ -5,7 +5,7 @@
 - O cadastro cria uma organização para o usuário e concede membership `owner` na mesma transação.
 - Um usuário pode pertencer a várias organizações; o workspace ativo precisa estar entre suas memberships.
 - Os papéis válidos são `owner`, `admin`, `manager` e `salesperson`.
-- Owner, admin e manager podem consultar a carteira completa da organização. Salesperson consulta apenas empresas atribuídas a si.
+- Na base inicial, owner, admin e manager consultavam a carteira completa; a Fase 4 restringe o manager às equipes que administra. Salesperson consulta apenas empresas atribuídas a si.
 - Um contato pertence a uma única organização, mas pode se relacionar com várias empresas daquela organização.
 - Papéis profissionais e contato principal pertencem ao vínculo empresa-contato.
 - Interações são registradas manualmente, atribuídas ao usuário autenticado e ligadas a uma empresa; contato é opcional.
@@ -14,7 +14,7 @@
 ## Implementadas na Fase 2
 
 - Tarefas possuem responsável, autor, vencimento, prioridade, estado e origem manual ou automática. Relações de empresa, contato e usuários são validadas dentro da organização.
-- Owner, admin e manager mantêm o escopo da organização; salesperson só consulta tarefas atribuídas a si em empresas da própria carteira.
+- Até a Fase 3, owner, admin e manager mantinham o escopo da organização; na Fase 4, manager passa a consultar tarefas comerciais de suas equipes. Salesperson só consulta tarefas atribuídas a si em empresas da própria carteira.
 - Concluir uma tarefa registra conclusão e observações, sem criar interação fictícia.
 - Criar prospecto, inscrição padrão e primeira tarefa é atômico. A autoinscrição fica ligada por padrão e pode ser alterada por owner, admin ou manager.
 - Inscrições ativas e pausadas não podem se duplicar para a mesma empresa e modelo. Jornadas concluídas ou canceladas podem ser iniciadas novamente.
@@ -29,6 +29,7 @@
 ### Vendas
 
 - Vendas são registradas manualmente para uma empresa da organização e um vendedor membro dela. Vendedores só podem registrar vendas para sua própria carteira e atribuí-las a si; papéis de gestão seguem o escopo atual da organização.
+- Vendedores podem consultar vendas históricas que registraram, mas só podem editar ou cancelar uma venda enquanto a empresa permanecer em sua carteira atual. Managers seguem o escopo atual das equipes; owner/admin seguem o escopo da organização.
 - Valores são positivos, armazenados em `decimal(14,2)` e a moeda inicial é BRL. Datas são interpretadas no fuso da organização, não podem estar no futuro e são persistidas em UTC.
 - Somente vendas confirmadas entram no faturamento, ticket médio, frequência e última compra. Cancelar preserva a linha, autor do cancelamento e data; não apaga histórico e não conta em agregados.
 - O primeiro registro confirmado de um prospecto muda sua situação para cliente, cancela a inscrição ativa/pausada de prospecção e inicia uma jornada pós-venda ativa selecionada pela organização, se houver. Cancelar a venda não reverte automaticamente a situação nem reabre jornadas históricas.
@@ -58,7 +59,33 @@
 
 O seeder apresenta os cenários fictícios de cliente estratégico, cliente inativo, prospecto sem compras, cliente reativado e cliente em evolução. Ele é restrito a `local` e `testing`, usa datas relativas e é idempotente. Nunca roda em produção.
 
+## Implementadas na Fase 4
+
+### Equipes e acesso
+
+- Cada empresa tem uma equipe principal opcional e um vendedor principal opcional. Quando os dois são informados, o vendedor deve ter membership ativa como salesperson na equipe e na organização.
+- Uma pessoa pode participar de várias equipes. A associação de equipes, sozinha, não dá a um vendedor acesso a empresas de colegas.
+- Owner/admin veem a organização e gerenciam equipes, convites e memberships. Só owner concede/revoga papéis de owner/admin; admin não pode alterar membros administrativos. O último owner ativo não pode ser desativado ou rebaixado.
+- Manager vê somente equipes ativas em que tem membership ativa de manager e dados comerciais das empresas dessas equipes. Manager sem equipe gerenciada não recebe acesso geral. Transferências ficam dentro de equipes administradas.
+- Seller vê apenas empresas em que é responsável e tarefas que pode gerenciar; managers veem tarefas de empresas de seu escopo e tarefas avulsas dos vendedores de suas equipes.
+- Memberships inativas permanecem no banco para preservar o vínculo. Vendedores não podem ser retirados de equipe enquanto mantiverem empresas atribuídas àquela equipe; transfira a carteira antes.
+- Uma equipe com empresas atribuídas ou convites pendentes/expirados ainda não aceitos ou revogados não pode ser desativada. Transfira a carteira e revogue os convites antes de arquivá-la.
+
+### Convites e carteiras
+
+- Convites são destinados a manager ou salesperson, normalizam o e-mail, expiram em sete dias, armazenam apenas hash SHA-256 do token e são de uso único. Aceite exige autenticação, e-mail verificado igual ao destinatário e conclusão transacional.
+- Reenvio substitui o token e invalida o link anterior. Revogação invalida o token. Usuários existentes podem aceitar convites sem criar outra conta ou organização.
+- Transferências auditam equipe/responsável anterior e novo, autor, data UTC e justificativa opcional. Transferência em lote inteira ocorre numa transação; IDs de outra organização rejeitam o lote antes de persistir alterações.
+- Tarefas automáticas abertas seguem as regras de reatribuição do motor de jornadas/inatividade; tarefas manuais e concluídas preservam seu responsável e histórico.
+
+### Dashboard e relatórios
+
+- O dashboard gerencial usa dados persistidos e limita sellers, tarefas, jornadas, alertas e empresas ao escopo autorizado. A tela de relatórios agrega no servidor e pagina os vendedores e a carteira de relacionamento.
+- Filtros aceitam período de até 366 dias sem datas futuras, equipe e vendedor autorizados, status e tipo de tarefa.
+- Taxa de conclusão = (tarefas elegíveis concluídas no prazo + concluídas com atraso) / total de tarefas elegíveis × 100. São elegíveis tarefas com vencimento no período até o instante atual; tarefas futuras e canceladas não entram no denominador. Pendentes vencidas continuam elegíveis.
+- Faturamento, quantidade, ticket e compradores usam somente vendas confirmadas. Vendas novas guardam equipe no momento da venda; registros legados sem snapshot usam a equipe atual da empresa.
+- Desempenho por vendedor usa a carteira atual e seller histórico da venda. O relatório informa explicitamente a política usada para vendas antigas.
+
 ## Planejadas
 
-- Equipes e escopo hierárquico de carteira para gestores.
 - Importação de vendas e integrações com ERP, fora do MVP atual.

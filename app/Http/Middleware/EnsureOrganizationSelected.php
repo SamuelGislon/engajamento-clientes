@@ -17,7 +17,10 @@ class EnsureOrganizationSelected
             abort(401);
         }
 
-        $organizations = $user->organizations()->orderBy('name')->get();
+        $organizations = $user->organizations()
+            ->wherePivot('is_active', true)
+            ->orderBy('name')
+            ->get();
 
         if ($organizations->isEmpty()) {
             abort(403, 'Sua conta ainda não pertence a uma organização.');

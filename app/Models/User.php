@@ -55,7 +55,7 @@ class User extends Authenticatable implements MustVerifyEmail, PasskeyUser
     {
         return $this->belongsToMany(Organization::class)
             ->using(OrganizationMembership::class)
-            ->withPivot('role')
+            ->withPivot(['role', 'is_active'])
             ->withTimestamps();
     }
 
@@ -77,6 +77,14 @@ class User extends Authenticatable implements MustVerifyEmail, PasskeyUser
         return $this->hasMany(Sale::class, 'seller_id');
     }
 
+    /** @return BelongsToMany<Team, $this> */
+    public function teams(): BelongsToMany
+    {
+        return $this->belongsToMany(Team::class, 'team_memberships')
+            ->withPivot(['organization_id', 'role', 'is_active', 'joined_at'])
+            ->withTimestamps();
+    }
+
     public function roleIn(?int $organizationId): ?string
     {
         if ($organizationId === null) {
@@ -85,6 +93,7 @@ class User extends Authenticatable implements MustVerifyEmail, PasskeyUser
 
         return $this->organizations()
             ->where('organizations.id', $organizationId)
+            ->wherePivot('is_active', true)
             ->first()?->pivot->role;
     }
 }

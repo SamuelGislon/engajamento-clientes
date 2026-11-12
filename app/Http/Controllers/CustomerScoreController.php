@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Domain\Commercial\CustomerScoreService;
+use App\Domain\Teams\CommercialAccessScope;
 use App\Domain\Tenancy\TenantContext;
 use App\Http\Requests\UpdateCustomerScoreRequest;
 use App\Models\Company;
@@ -23,7 +24,8 @@ class CustomerScoreController extends Controller
         $organizationId = app(TenantContext::class)->id();
         $filters = $request->validate([
             'tier' => ['nullable', Rule::in(['A', 'B', 'C', 'D', 'incomplete'])],
-            'owner_user_id' => ['nullable', 'integer', Rule::exists('organization_user', 'user_id')->where('organization_id', $organizationId)],
+            'owner_user_id' => ['nullable', 'integer', Rule::exists('organization_user', 'user_id')
+                ->where('organization_id', $organizationId)->where('role', 'salesperson')->where('is_active', true)],
             'segment' => ['nullable', 'string', 'max:100'],
             'relationship_status' => ['nullable', Rule::in(['prospect', 'customer', 'inactive', 'partner'])],
             'from' => ['nullable', 'date_format:Y-m-d'],
@@ -67,7 +69,13 @@ class CustomerScoreController extends Controller
             'companies' => $companies,
             'filters' => $filters,
             'owners' => app(TenantContext::class)->organization()?->users()
+                ->where('organization_user.role', 'salesperson')
+                ->where('organization_user.is_active', true)
                 ->when($user->roleIn($organizationId) === 'salesperson', fn ($users) => $users->where('users.id', $user->id))
+                ->when($user->roleIn($organizationId) === 'manager', fn ($users) => $users->whereIn(
+                    'users.id',
+                    app(CommercialAccessScope::class)->managedSellerIds($user, $organizationId),
+                ))
                 ->orderBy('name')
                 ->get(['users.id', 'users.name']) ?? collect(),
             'segments' => Company::query()->visibleTo($user)->whereNotNull('segment')->distinct()->orderBy('segment')->pluck('segment'),

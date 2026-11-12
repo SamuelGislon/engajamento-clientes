@@ -2,8 +2,10 @@
 
 namespace App\Models;
 
+use App\Domain\Tenancy\TenantContext;
 use App\Models\Concerns\BelongsToOrganization;
 use Database\Factories\ContactFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -33,5 +35,24 @@ class Contact extends Model
     public function activities(): HasMany
     {
         return $this->hasMany(Activity::class)->latest('occurred_at');
+    }
+
+    /**
+     * @param  Builder<Contact>  $query
+     * @return Builder<Contact>
+     */
+    public function scopeVisibleTo(Builder $query, User $user): Builder
+    {
+        $role = $user->roleIn(app(TenantContext::class)->id());
+
+        if (in_array($role, ['owner', 'admin'], true)) {
+            return $query;
+        }
+
+        if (! in_array($role, ['manager', 'salesperson'], true)) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        return $query->whereHas('companies', fn (Builder $companies) => $companies->visibleTo($user));
     }
 }

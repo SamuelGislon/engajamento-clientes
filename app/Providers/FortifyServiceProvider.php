@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Actions\Fortify\CreateNewUser;
 use App\Actions\Fortify\ResetUserPassword;
+use App\Models\OrganizationInvitation;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
@@ -67,8 +68,9 @@ class FortifyServiceProvider extends ServiceProvider
             'status' => $request->session()->get('status'),
         ]));
 
-        Fortify::registerView(fn () => Inertia::render('auth/register', [
+        Fortify::registerView(fn (Request $request) => Inertia::render('auth/register', [
             'passwordRules' => Password::defaults()->toPasswordRulesString(),
+            'invitationEmail' => $this->pendingInvitationEmail($request),
         ]));
 
         Fortify::twoFactorChallengeView(fn () => Inertia::render('auth/two-factor-challenge'));
@@ -96,5 +98,20 @@ class FortifyServiceProvider extends ServiceProvider
                 ($request->input('credential.id') ?: $request->session()->getId()).'|'.$request->ip(),
             );
         });
+    }
+
+    private function pendingInvitationEmail(Request $request): ?string
+    {
+        $token = $request->session()->get('pending_invitation_token');
+
+        if (! is_string($token)) {
+            return null;
+        }
+
+        $invitation = OrganizationInvitation::findByRawToken($token);
+
+        return $invitation !== null && $invitation->displayStatus() === 'pending'
+            ? $invitation->email
+            : null;
     }
 }

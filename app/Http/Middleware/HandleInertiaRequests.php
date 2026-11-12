@@ -49,6 +49,7 @@ class HandleInertiaRequests extends Middleware
                 'role' => $request->user()?->roleIn($activeOrganization->id),
             ],
             'organizations' => fn () => $request->user()?->organizations()
+                ->wherePivot('is_active', true)
                 ->orderBy('name')
                 ->get(['organizations.id', 'organizations.name'])
                 ->map(fn ($organization) => [
