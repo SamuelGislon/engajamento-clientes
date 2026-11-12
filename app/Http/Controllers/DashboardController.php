@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Domain\Teams\CommercialReportService;
 use App\Domain\Tenancy\TenantContext;
 use App\Models\Activity;
 use App\Models\CommercialAlertOccurrence;
@@ -20,6 +21,8 @@ class DashboardController
     public function __invoke(Request $request): Response
     {
         $user = $request->user();
+        $organization = app(TenantContext::class)->organization();
+        $role = $user->roleIn(app(TenantContext::class)->id());
         $baseCompanies = Company::query()->visibleTo($user);
         $timezone = app(TenantContext::class)->organization()->timezone;
         $localTodayStart = now($timezone)->startOfDay();
@@ -28,7 +31,7 @@ class DashboardController
         $periodStart = now($timezone)->startOfMonth()->utc();
         $periodEnd = now($timezone)->startOfMonth()->addMonth()->utc();
         $openTasks = Task::query()->visibleTo($user)->whereIn('status', ['pending', 'in_progress', 'postponed']);
-        $activeJourneys = JourneyEnrollment::query()->whereIn('status', ['active', 'paused']);
+        $activeJourneys = JourneyEnrollment::query()->visibleTo($user)->whereIn('status', ['active', 'paused']);
 
         if ($user->roleIn(app(TenantContext::class)->id()) === 'salesperson') {
             $activeJourneys->where('assigned_to', $user->id)
@@ -107,16 +110,16 @@ class DashboardController
             ->distinct('company_id')
             ->count('company_id');
 
+        $managerReport = $role === 'manager' && $organization !== null
+            ? app(CommercialReportService::class)->generate($user, $organization, [], 5, false)
+            : null;
+
         return Inertia::render('dashboard', [
             'metrics' => [
                 'companies' => (clone $baseCompanies)->count(),
                 'prospects' => (clone $baseCompanies)->where('relationship_status', 'prospect')->count(),
                 'customers' => (clone $baseCompanies)->where('relationship_status', 'customer')->count(),
-                'contacts' => Contact::query()
-                    ->when($user->roleIn(app(TenantContext::class)->id()) === 'salesperson', fn ($query) => $query->whereHas(
-                        'companies', fn ($companies) => $companies->where('companies.owner_user_id', $user->id),
-                    ))
-                    ->count(),
+                'contacts' => Contact::query()->visibleTo($user)->count(),
                 'tasks_due_today' => (clone $openTasks)->where('due_at', '>=', $todayStart)->where('due_at', '<', $tomorrowStart)->count(),
                 'overdue_tasks' => (clone $openTasks)->where('due_at', '<', $todayStart)->count(),
                 'active_journeys' => $activeJourneys->count(),
@@ -151,18 +154,19 @@ class DashboardController
             ],
             'commercialAttention' => $commercialAttention,
             'commercialTimezone' => $timezone,
+            'managerReport' => $managerReport === null ? null : [
+                'summary' => $managerReport['summary'],
+                'sellerPerformance' => $managerReport['sellerPerformance'],
+            ],
             'recentActivities' => Activity::query()
+                ->visibleTo($user)
                 ->with(['company:id,name', 'contact:id,name', 'user:id,name'])
-                ->when($user->roleIn(app(TenantContext::class)->id()) === 'salesperson', fn ($query) => $query->whereHas(
-                    'company', fn ($companies) => $companies->where('owner_user_id', $user->id),
-                ))
                 ->latest('occurred_at')
                 ->limit(6)
                 ->get(),
             'attentionCompanies' => (clone $baseCompanies)
                 ->withMax('activities', 'occurred_at')
-                ->orderByRaw('activities_max_occurred_at IS NULL DESC')
-                ->orderBy('activities_max_occurred_at')
+                ->orderByRaw('"activities_max_occurred_at" ASC NULLS FIRST')
                 ->limit(5)
                 ->get(['id', 'name', 'relationship_status', 'owner_user_id']),
         ]);

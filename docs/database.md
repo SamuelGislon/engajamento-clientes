@@ -19,7 +19,13 @@
 - `customer_scores`: composição atual do score por empresa, critérios manuais opcionais, completude, faixa e horário de cálculo.
 - `customer_score_histories`: snapshots auditáveis da composição, faixa, justificativa e data de alteração.
 - `commercial_alert_occurrences`: ocorrência idempotente de inatividade comercial ou de relacionamento, com chave, período, motivo, tarefa e contato recomendados, estado e resolução.
-- `notifications`: notificações Laravel por usuário; o `organization_id` fica no payload para filtrar cada workspace sem expor avisos de outros tenants.
+- `teams`: equipes pertencentes à organização, com nome, estado e autor de criação.
+- `team_memberships`: vínculo tenant-first de usuário com equipe, papel limitado a gestor/vendedor, estado ativo e data de entrada. Uma pessoa pode participar de várias equipes.
+- `organization_invitations`: convite por organização/e-mail/papel/equipe, hash único de token, estado, validade, aceite/revogação e autor. Convites pendentes não duplicam e-mail dentro da mesma organização.
+- `company_assignment_histories`: trilha de troca de responsável/equipe, valores anterior e novo, ator, justificativa opcional e instante UTC.
+- `companies.team_id`: equipe principal explícita da carteira; o responsável continua em `owner_user_id`.
+- `sales.team_id_at_sale`: snapshot da equipe no momento do registro, sem alterar `seller_id` histórico.
+- `notifications`: notificações Laravel por usuário; o campo `data` é JSON e inclui `organization_id` para filtrar cada workspace sem expor avisos de outros tenants.
 
 ## Integridade e isolamento
 
@@ -28,6 +34,8 @@ Todas as tabelas comerciais possuem `organization_id`. Os relacionamentos são f
 `organization_user` usa unicidade em `(organization_id, user_id)`. O papel está nessa associação para evitar que alternar workspace altere privilégios de outra organização. Tarefas e jornadas usam chaves estrangeiras compostas com `organization_id`, índices tenant-first e vínculos que impedem empresa, contato, usuário, modelo ou etapa de outro tenant. Uma inscrição ativa ou pausada é única por empresa e modelo. Uma execução possui no máximo uma tarefa gerada. Um template ativo padrão é único por organização.
 
 Vendas têm chaves compostas para empresa, vendedor, criador e usuário que cancelou; `(organization_id, external_id)` é único quando há identificador externo. Configurações têm unicidade por organização e chaves compostas para os modelos pós-venda e reativação selecionados. Score atual é único por empresa/organização. Histórico, ocorrências, tarefas e contatos recomendados permanecem vinculados ao mesmo tenant. Ocorrências usam unicidade em `(organization_id, company_id, type, occurrence_key)` para deduplicar reprocessamentos e concorrência.
+
+Equipes e memberships têm chaves tenant-first para impedir vínculo a outra organização; `(team_id, user_id)` é único e memberships desativadas são preservadas. Convites guardam apenas SHA-256 do token bruto, têm índice único parcial para convites não aceitos/não revogados e expiram após sete dias. Históricos de atribuição têm foreign keys compostas para empresa, memberships, equipes e ator.
 
 ## Relacionamentos
 
@@ -39,6 +47,9 @@ Vendas têm chaves compostas para empresa, vendedor, criador e usuário que canc
 - JourneyTemplate 1:N JourneyStep e JourneyEnrollment; JourneyEnrollment 1:N JourneyStepExecution e Task.
 - JourneyStep 1:N JourneyStepExecution; JourneyStepExecution 1:1 Task automática.
 - Organization 1:N Sale, CommercialSetting, CustomerScore, CustomerScoreHistory e CommercialAlertOccurrence.
+- Organization 1:N Team, OrganizationInvitation e CompanyAssignmentHistory; Team N:N User via `team_memberships`; Team 1:N Company.
+- Sale N:1 Team via `team_id_at_sale`, preservando o time associado à venda no momento do registro.
+- CompanyAssignmentHistory N:1 Company, memberships anteriores/novas, equipes anteriores/novas e ator.
 - Company 1:N Sale, CustomerScore, CustomerScoreHistory e CommercialAlertOccurrence; ocorrências podem apontar para uma tarefa e um contato recomendado.
 - CommercialSetting N:1 JourneyTemplate para os modelos pós-venda e reativação opcionais.
 

@@ -590,8 +590,12 @@ it('reassigns automatic standalone tasks when a manager changes company ownershi
     $organization->users()->attach($formerSeller, ['role' => 'salesperson']);
     $organization->users()->attach($newSeller, ['role' => 'salesperson']);
     app(TenantContext::class)->set($organization);
+    $team = createManagedTeam($organization, $manager);
+    assignTeamMember($organization, $team, $formerSeller, 'salesperson');
+    assignTeamMember($organization, $team, $newSeller, 'salesperson');
     $company = Company::factory()->ownedBy($formerSeller)->create([
         'organization_id' => $organization->id,
+        'team_id' => $team->id,
         'relationship_status' => 'customer',
     ]);
     $this->actingAs($formerSeller)->withSession(['active_organization_id' => $organization->id]);

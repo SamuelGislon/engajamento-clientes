@@ -21,7 +21,8 @@ class ContactManagementTest extends TestCase
         $manager = User::factory()->create();
         $organization->users()->attach($manager, ['role' => 'manager']);
         app(TenantContext::class)->set($organization);
-        $company = Company::factory()->create(['organization_id' => $organization->id]);
+        $team = createManagedTeam($organization, $manager);
+        $company = Company::factory()->create(['organization_id' => $organization->id, 'team_id' => $team->id]);
 
         $response = $this->actingAs($manager)
             ->withSession(['active_organization_id' => $organization->id])
@@ -53,8 +54,9 @@ class ContactManagementTest extends TestCase
         $manager = User::factory()->create();
         $organization->users()->attach($manager, ['role' => 'manager']);
         app(TenantContext::class)->set($organization);
-        $firstCompany = Company::factory()->create(['organization_id' => $organization->id]);
-        $secondCompany = Company::factory()->create(['organization_id' => $organization->id]);
+        $team = createManagedTeam($organization, $manager);
+        $firstCompany = Company::factory()->create(['organization_id' => $organization->id, 'team_id' => $team->id]);
+        $secondCompany = Company::factory()->create(['organization_id' => $organization->id, 'team_id' => $team->id]);
         $contact = Contact::factory()->create(['organization_id' => $organization->id]);
         $firstCompany->contacts()->attach($contact->id, [
             'organization_id' => $organization->id,

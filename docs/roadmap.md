@@ -16,7 +16,8 @@
 - [x] Progressão idempotente, pausa, retomada, cancelamento e fuso por organização.
 - [x] Notificações internas, e-mail de atribuição após commit e Scheduler de prazos.
 - [x] Telas de jornada, detalhe da empresa, dashboard e central de notificações.
-- [ ] Validar migrations e concorrência em PostgreSQL, worker Redis, Scheduler ativo e Mailpit com Docker.
+- [x] Validar migrations e suíte completa em PostgreSQL, worker Redis, Scheduler e Mailpit.
+- [x] Exercitar concorrência PostgreSQL em progressão de jornada, geração idempotente de tarefa e Scheduler de lembretes.
 
 ## Fase 3 — Inteligência comercial
 
@@ -25,12 +26,17 @@
 - [x] Classificação por pontuação, critérios manuais, histórico de faixas e filtros.
 - [x] Dashboard acionável e dados demonstrativos fictícios protegidos por ambiente.
 - [x] Integração de jornadas pós-venda e reativação com o motor da Fase 2.
-- [ ] Validar migrations e concorrência em PostgreSQL, worker Redis, Scheduler ativo, Mailpit e fluxo E2E.
+- [x] Validar migrations e suíte completa em PostgreSQL, worker Redis, Scheduler e Mailpit.
+- [x] Exercitar concorrência PostgreSQL em alertas de inatividade, compra durante varredura, cancelamento durante recálculo e transferência durante progressão; verificar retentativa Redis e deduplicação.
 
 ## Fase 4 — Equipes e gestão
 
-- [ ] Equipes, convites e escopo hierárquico de carteira.
-- [ ] Painel do gestor e relatórios por vendedor.
+- [x] Equipes, memberships e escopo hierárquico para gestores.
+- [x] Convites com token seguro, expiração, reenvio e aceite transacional.
+- [x] Distribuição e transferência auditável de carteiras, incluindo lote transacional.
+- [x] Dashboard gerencial e relatórios paginados por atividade, relacionamento e venda.
+- [x] Validar migrations e suíte completa em PostgreSQL, aceite concorrente de convite, worker Redis, Scheduler e convite por e-mail no Mailpit.
+- [x] Validar seis fluxos E2E no Chromium real, incluindo equipes, convite por Mailpit, carteira, tarefa, negação de acesso e relatórios.
 
 ## Fase 5 — Adoção e preparação comercial
 
@@ -39,6 +45,4 @@
 
 ## Pendências técnicas
 
-- Validar a implantação em ambiente com Docker e PostgreSQL.
-- Formalizar convites, verificação de e-mail obrigatória e recuperação de acesso operacional.
-- Adicionar testes E2E após estabilizar os fluxos principais.
+- A Fase 5 ainda precisa implementar importação, onboarding, exportação e auditoria; verifique o roadmap ao concluir cada bloco.

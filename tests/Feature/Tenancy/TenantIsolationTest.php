@@ -56,7 +56,8 @@ class TenantIsolationTest extends TestCase
         app(TenantContext::class)->set($firstOrganization);
         Company::factory()->create(['organization_id' => $firstOrganization->id]);
         app(TenantContext::class)->set($secondOrganization);
-        Company::factory()->create(['organization_id' => $secondOrganization->id]);
+        $team = createManagedTeam($secondOrganization, $user);
+        Company::factory()->create(['organization_id' => $secondOrganization->id, 'team_id' => $team->id]);
 
         $this->actingAs($user)
             ->withSession(['active_organization_id' => $firstOrganization->id])

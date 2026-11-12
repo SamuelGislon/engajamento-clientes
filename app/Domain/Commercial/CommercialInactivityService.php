@@ -259,6 +259,39 @@ class CommercialInactivityService
     ): bool {
         return DB::transaction(function () use ($company, $type, $occurrenceKey, $anchorAt, $reason, $title, $taskType, $recommendedContact, $reactivationJourneyTemplateId): bool {
             $lockedCompany = Company::query()->lockForUpdate()->findOrFail($company->id);
+
+            if ($type === 'commercial_inactivity') {
+                $latestSale = $lockedCompany->sales()
+                    ->where('status', 'confirmed')
+                    ->orderByDesc('sold_at')
+                    ->orderByDesc('id')
+                    ->first(['id', 'sold_at']);
+
+                if ($latestSale === null
+                    || $latestSale->id !== (int) $company->getAttribute('last_confirmed_sale_id')
+                    || ! $latestSale->sold_at->equalTo($anchorAt)) {
+                    return false;
+                }
+            }
+
+            if ($type === 'relationship_inactivity') {
+                $latestActivity = $lockedCompany->activities()
+                    ->orderByDesc('occurred_at')
+                    ->orderByDesc('id')
+                    ->first(['id', 'occurred_at']);
+                $snapshotActivityId = (int) ($company->getAttribute('last_activity_id') ?? 0);
+                $currentActivityId = (int) ($latestActivity->id ?? 0);
+                $currentActivityAt = CarbonImmutable::parse(
+                    $latestActivity->occurred_at ?? $lockedCompany->created_at,
+                    'UTC',
+                );
+
+                if ($currentActivityId !== $snapshotActivityId
+                    || ! $currentActivityAt->equalTo($anchorAt)) {
+                    return false;
+                }
+            }
+
             $occurrence = CommercialAlertOccurrence::query()
                 ->where('company_id', $lockedCompany->id)
                 ->where('type', $type)

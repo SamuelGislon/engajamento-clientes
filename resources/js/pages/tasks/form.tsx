@@ -12,9 +12,14 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import type { BreadcrumbItem } from '@/types';
 
-type Member = { id: number; name: string };
+type Member = { id: number; name: string; team_ids: number[] };
 type Contact = { id: number; name: string };
-type Company = { id: number; name: string; contacts: Contact[] };
+type Company = {
+    id: number;
+    name: string;
+    team_id: number | null;
+    contacts: Contact[];
+};
 type Task = {
     id: number;
     title: string;
@@ -59,11 +64,13 @@ export default function TaskForm({
     companies,
     members,
     canChangeRelations,
+    restrictAssigneesToCompanyTeam,
 }: {
     task: Task | null;
     companies: Company[];
     members: Member[];
     canChangeRelations: boolean;
+    restrictAssigneesToCompanyTeam: boolean;
 }) {
     const form = useForm({
         title: task?.title ?? '',
@@ -82,6 +89,17 @@ export default function TaskForm({
             ),
         [companies, form.data.company_id],
     );
+    const selectedCompanyTeamId = selectedCompany?.team_id;
+    const assignableMembers =
+        restrictAssigneesToCompanyTeam &&
+        selectedCompanyTeamId !== null &&
+        selectedCompanyTeamId !== undefined
+            ? members.filter(
+                  (member) =>
+                      member.team_ids.includes(selectedCompanyTeamId) ||
+                      member.id === task?.assignee.id,
+              )
+            : members;
 
     function submit(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -292,7 +310,7 @@ export default function TaskForm({
                                     }
                                     className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                                 >
-                                    {members.map((member) => (
+                                    {assignableMembers.map((member) => (
                                         <option
                                             key={member.id}
                                             value={member.id}

@@ -1,26 +1,50 @@
 <?php
 
+use App\Http\Controllers\CommercialReportController;
 use App\Http\Controllers\CommercialSettingsController;
 use App\Http\Controllers\CompanyController;
+use App\Http\Controllers\CompanyPortfolioController;
 use App\Http\Controllers\ContactController;
 use App\Http\Controllers\CustomerScoreController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\JourneyEnrollmentController;
 use App\Http\Controllers\JourneyTemplateController;
 use App\Http\Controllers\NotificationController;
+use App\Http\Controllers\OrganizationInvitationController;
+use App\Http\Controllers\OrganizationMemberController;
 use App\Http\Controllers\OrganizationSwitchController;
 use App\Http\Controllers\SaleController;
 use App\Http\Controllers\TaskController;
+use App\Http\Controllers\TeamController;
 use App\Http\Middleware\EnsureOrganizationSelected;
 use Illuminate\Support\Facades\Route;
 
 Route::inertia('/', 'welcome')->name('home');
+
+Route::get('/invitations/{token}', [OrganizationInvitationController::class, 'show'])
+    ->where('token', '[a-f0-9]{64}')
+    ->name('invitations.show');
+Route::post('/invitations/{token}/accept', [OrganizationInvitationController::class, 'accept'])
+    ->middleware(['auth', 'verified'])
+    ->where('token', '[a-f0-9]{64}')
+    ->name('invitations.accept');
 
 Route::middleware(['auth', 'verified'])->group(function (): void {
     Route::post('/organization/switch', OrganizationSwitchController::class)->name('organizations.switch');
 
     Route::middleware(EnsureOrganizationSelected::class)->group(function (): void {
         Route::get('/dashboard', DashboardController::class)->name('dashboard');
+        Route::get('/reports', CommercialReportController::class)->name('reports.index');
+        Route::get('/teams', [TeamController::class, 'index'])->name('teams.index');
+        Route::post('/teams', [TeamController::class, 'store'])->name('teams.store');
+        Route::get('/teams/{team}', [TeamController::class, 'show'])->whereNumber('team')->name('teams.show');
+        Route::patch('/teams/{team}', [TeamController::class, 'update'])->whereNumber('team')->name('teams.update');
+        Route::put('/teams/{team}/members', [TeamController::class, 'syncMembers'])->whereNumber('team')->name('teams.members.sync');
+        Route::get('/organization/users', [OrganizationInvitationController::class, 'index'])->name('organization.users.index');
+        Route::patch('/organization/users/{user}', [OrganizationMemberController::class, 'update'])->whereNumber('user')->name('organization.users.update');
+        Route::post('/organization/invitations', [OrganizationInvitationController::class, 'store'])->name('organization.invitations.store');
+        Route::post('/organization/invitations/{invitation}/resend', [OrganizationInvitationController::class, 'resend'])->whereNumber('invitation')->name('organization.invitations.resend');
+        Route::delete('/organization/invitations/{invitation}', [OrganizationInvitationController::class, 'revoke'])->whereNumber('invitation')->name('organization.invitations.revoke');
         Route::get('/commercial-settings', [CommercialSettingsController::class, 'edit'])->name('commercial-settings.edit');
         Route::patch('/commercial-settings', [CommercialSettingsController::class, 'update'])->name('commercial-settings.update');
         Route::get('/sales', [SaleController::class, 'index'])->name('sales.index');
@@ -41,6 +65,8 @@ Route::middleware(['auth', 'verified'])->group(function (): void {
         Route::post('/tasks/{task}/cancel', [TaskController::class, 'cancel'])->whereNumber('task')->name('tasks.cancel');
 
         Route::get('/companies', [CompanyController::class, 'index'])->name('companies.index');
+        Route::get('/companies/portfolio', [CompanyPortfolioController::class, 'index'])->name('companies.portfolio.index');
+        Route::post('/companies/portfolio/transfer', [CompanyPortfolioController::class, 'transfer'])->name('companies.portfolio.transfer');
         Route::get('/companies/create', [CompanyController::class, 'create'])->name('companies.create');
         Route::post('/companies', [CompanyController::class, 'store'])->name('companies.store');
         Route::get('/companies/{company}', [CompanyController::class, 'show'])->whereNumber('company')->name('companies.show');

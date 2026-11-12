@@ -15,7 +15,9 @@ Aplicação monolítica modular em Laravel, organizada por domínios e servida p
 - **Notifications**: avisos internos isolados por organização e e-mail de atribuição enviado pela fila após commit.
 - **Sales**: registro manual e auditável de vendas confirmadas ou canceladas, com consultas agregadas por empresa e período.
 - **Commercial intelligence**: pontuação, histórico de faixas, ocorrências de inatividade, tarefas acionáveis e configurações por organização.
-- **Dashboard**: indicadores calculados a partir de empresas, vendas, tarefas, ocorrências e inscrições persistidas.
+- **Teams**: equipes, memberships de gestores/vendedores, escopo comercial centralizado, transferências auditáveis de carteira e convites.
+- **Reports**: agregações paginadas de atividades, relacionamento e vendas, com filtros de período/equipe/vendedor sob o mesmo escopo comercial.
+- **Dashboard**: indicadores calculados a partir de empresas, vendas, tarefas, ocorrências e inscrições persistidas; gestores recebem desempenho das equipes que administram.
 - **Auth/Settings**: autenticação e configurações herdadas do starter kit oficial.
 
 Equipes e relatórios hierárquicos de gestão permanecem nas fases correspondentes.
@@ -26,11 +28,11 @@ Uma conta de usuário se relaciona a várias organizações através de `organiz
 
 Após autenticar, `EnsureOrganizationSelected` resolve uma organização entre as memberships do usuário e coloca seu ID no `TenantContext` da requisição. O contexto é scoped pelo container para não vazar entre requisições em workers persistentes. Modelos de domínio aplicam um global scope que falha fechado quando não há organização ativa e preenchem `organization_id` na criação. Trocas de workspace só aceitam IDs presentes nas memberships da conta.
 
-Form Requests verificam responsáveis e vínculos no escopo da organização. Policies aplicam visibilidade de carteira: owner, admin e manager veem os registros da organização; salesperson vê somente registros ligados a empresas próprias e tarefas atribuídas a ele. Vendas, scores, ocorrências e configurações usam chaves estrangeiras compostas ou consultas tenant-scoped. A camada web é uma experiência, nunca a fronteira de segurança.
+Form Requests verificam responsáveis e vínculos no escopo da organização. Policies e `CommercialAccessScope` aplicam visibilidade de carteira: owner/admin veem os registros da organização; manager vê empresas e dados comerciais das equipes ativas que administra; salesperson vê somente suas empresas e tarefas atribuídas a si. Vendedores mantêm leitura das próprias vendas históricas, mas edição e cancelamento exigem que a empresa ainda esteja em sua carteira atual. Pertencer à mesma equipe não compartilha a carteira entre vendedores. Vendas, scores, ocorrências e configurações usam chaves estrangeiras compostas ou consultas tenant-scoped. A camada web é uma experiência, nunca a fronteira de segurança.
 
 ## Autenticação e autorização
 
-O starter kit Laravel React usa Fortify e sessões Laravel. O cadastro requer nome da organização e cria conta, organização e membership em transação. Policies usam papel e ownership em cada operação. O e-mail corporativo e a identidade do usuário são globais; dados comerciais permanecem por organização.
+O starter kit Laravel React usa Fortify e sessões Laravel. O cadastro comum cria conta, organização e membership owner em transação. Convites concedem inicialmente apenas manager ou salesperson; guardam hash de token com uso único e expiração, exigem e-mail verificado correspondente e são aceitos em transação. A conta global permanece independente das memberships em cada organização.
 
 ## Organização do código
 
@@ -56,13 +58,19 @@ Quando configurada, uma jornada do tipo `reactivation` e gatilho `sales_inactivi
 
 `CustomerScoreService` agrega vendas confirmadas dos últimos 12 meses, aplica as faixas de volume e frequência da organização, soma os critérios manuais e grava histórico somente quando a composição muda. Critérios manuais ausentes deixam a classificação incompleta, em vez de pontuar zero. Os valores padrão e fórmulas estão documentados em `docs/business-rules.md`.
 
+## Equipes, carteiras e histórico
+
+`CommercialAccessScope` resolve equipes e vendedores administrados. A empresa tem uma equipe principal explícita e um vendedor responsável opcional; o vendedor precisa ter membership ativa nessa equipe. Owners/admins distribuem carteiras na organização. Managers só transferem empresas entre equipes que administram. A alteração de responsável registra antes/depois, ator, motivo e data; tarefas automáticas abertas acompanham a transferência segundo o serviço existente, enquanto tarefas manuais e histórico concluído permanecem.
+
+Vendas novas gravam `team_id_at_sale` para preservar a atribuição histórica da equipe. Vendas antigas sem snapshot são agregadas usando a equipe atual da empresa; essa compatibilidade deve ser considerada ao interpretar relatórios históricos. Relatórios usam agregações SQL e paginação e respeitam os mesmos scopes dos endpoints comerciais.
+
 ## Decisões e limites atuais
 
 - Banco compartilhado e `organization_id` em cada tabela de domínio, com escopo Laravel e validação de relações.
 - As pessoas são únicas por organização e podem estar associadas a diversas empresas; funções são propriedades do vínculo empresa-pessoa.
 - Última interação é derivada das atividades e não mantida em coluna duplicada.
-- Vendas, pós-venda, inatividade comercial e de relacionamento, classificação e dashboard comercial estão implementados na Fase 3.
-- A primeira versão mantém uma política de vendedor simples por responsável. Escopos por equipe virão na Fase 4.
+- Vendas, pós-venda, inatividade comercial e de relacionamento, classificação e dashboard comercial foram implementados na Fase 3.
+- O escopo por equipe e os relatórios gerenciais pertencem à Fase 4. Equipes não criam compartilhamento geral entre vendedores.
 
 ## Tarefas, jornadas e notificações
 

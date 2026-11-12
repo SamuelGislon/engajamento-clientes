@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\DB;
 
 /**
  * @property int $id
@@ -105,14 +106,52 @@ class Task extends Model
      */
     public function scopeVisibleTo(Builder $query, User $user): Builder
     {
-        if ($user->roleIn(app(TenantContext::class)->id()) === 'salesperson') {
-            $query->where('assigned_to', $user->id)
+        $organizationId = app(TenantContext::class)->id();
+        $role = $user->roleIn($organizationId);
+
+        if ($organizationId === null || $role === null) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        if (in_array($role, ['owner', 'admin'], true)) {
+            return $query;
+        }
+
+        if ($role === 'salesperson') {
+            return $query->where('assigned_to', $user->id)
                 ->where(function (Builder $nested) use ($user): void {
                     $nested->whereNull('company_id')
-                        ->orWhereHas('company', fn (Builder $companies) => $companies->where('owner_user_id', $user->id));
+                        ->orWhereHas('company', fn (Builder $companies) => $companies->visibleTo($user));
                 });
         }
 
-        return $query;
+        if ($role !== 'manager') {
+            return $query->whereRaw('1 = 0');
+        }
+
+        $managedTeamIds = DB::table('team_memberships')
+            ->select('team_id')
+            ->where('organization_id', $organizationId)
+            ->where('user_id', $user->id)
+            ->where('role', 'manager')
+            ->where('is_active', true)
+            ->whereExists(fn ($teams) => $teams->selectRaw('1')
+                ->from('teams')
+                ->whereColumn('teams.id', 'team_memberships.team_id')
+                ->whereColumn('teams.organization_id', 'team_memberships.organization_id')
+                ->where('teams.status', 'active'));
+        $managedSellerIds = DB::table('team_memberships')
+            ->select('user_id')
+            ->where('organization_id', $organizationId)
+            ->whereIn('team_id', $managedTeamIds)
+            ->where('role', 'salesperson')
+            ->where('is_active', true);
+
+        return $query->where(function (Builder $nested) use ($user, $managedSellerIds): void {
+            $nested->whereHas('company', fn (Builder $companies) => $companies->visibleTo($user))
+                ->orWhere(fn (Builder $standalone) => $standalone
+                    ->whereNull('company_id')
+                    ->whereIn('assigned_to', $managedSellerIds));
+        });
     }
 }

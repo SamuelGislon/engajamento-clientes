@@ -15,13 +15,8 @@ class TaskPolicy
 
     public function view(User $user, Task $task): bool
     {
-        if (! $this->viewAny($user)) {
-            return false;
-        }
-
-        return $user->roleIn(app(TenantContext::class)->id()) !== 'salesperson'
-            || ($task->assigned_to === $user->id
-                && ($task->company_id === null || $task->company?->owner_user_id === $user->id));
+        return $this->viewAny($user)
+            && Task::query()->visibleTo($user)->whereKey($task->id)->exists();
     }
 
     public function create(User $user): bool

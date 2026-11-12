@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Domain\Tenancy\TenantContext;
 use App\Enums\ContactRole;
-use App\Enums\OrganizationRole;
 use App\Http\Requests\StoreContactRequest;
 use App\Models\Company;
 use App\Models\Contact;
@@ -23,17 +22,10 @@ class ContactController
         Gate::authorize('viewAny', Contact::class);
 
         $user = $request->user();
-        $isSalesperson = $user->roleIn(app(TenantContext::class)->id()) === OrganizationRole::Salesperson->value;
         $contacts = Contact::query()
-            ->when($isSalesperson, fn ($query) => $query->whereHas(
-                'companies', fn ($companies) => $companies->where('companies.owner_user_id', $user->id),
-            ))
-            ->with(['companies' => function (BelongsToMany $query) use ($isSalesperson, $user): void {
-                if ($isSalesperson) {
-                    $query->where('companies.owner_user_id', $user->id);
-                }
-
-                $query->select('companies.id', 'companies.name', 'companies.trade_name');
+            ->visibleTo($user)
+            ->with(['companies' => function (BelongsToMany $query) use ($user): void {
+                $query->visibleTo($user)->select('companies.id', 'companies.name', 'companies.trade_name');
             }])
             ->when($request->string('q')->trim()->isNotEmpty(), function ($query) use ($request): void {
                 $term = '%'.$request->string('q')->trim().'%';

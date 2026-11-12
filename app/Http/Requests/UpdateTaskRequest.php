@@ -3,9 +3,13 @@
 namespace App\Http\Requests;
 
 use App\Domain\Tenancy\TenantContext;
+use App\Models\Company;
 use App\Models\Task;
+use Closure;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 class UpdateTaskRequest extends FormRequest
 {
@@ -29,6 +33,11 @@ class UpdateTaskRequest extends FormRequest
         $user = $this->user();
         $isSalesperson = $user?->roleIn($organizationId) === 'salesperson';
         $manualTaskRules = $task instanceof Task && $task->origin === 'manual';
+        $assignmentRule = Rule::exists('organization_user', 'user_id')->where('organization_id', $organizationId);
+        $requestedAssignee = $this->input('assigned_to', $task instanceof Task ? $task->assigned_to : null);
+        if (! ($task instanceof Task) || (int) $requestedAssignee !== $task->assigned_to) {
+            $assignmentRule->where('is_active', true);
+        }
 
         return [
             'title' => ['sometimes', 'required', 'string', 'max:180'],
@@ -49,9 +58,68 @@ class UpdateTaskRequest extends FormRequest
             ],
             'assigned_to' => [
                 ...($manualTaskRules ? ['sometimes', 'nullable', 'integer'] : ['prohibited']),
-                ...($manualTaskRules ? [Rule::exists('organization_user', 'user_id')->where('organization_id', $organizationId)] : []),
+                ...($manualTaskRules ? [$assignmentRule] : []),
                 ...($manualTaskRules && $isSalesperson ? [Rule::in([$user->id])] : []),
             ],
         ];
+    }
+
+    /** @return array<int, Closure> */
+    public function after(): array
+    {
+        return [function (Validator $validator): void {
+            $task = $this->route('task');
+            $user = $this->user();
+            $organizationId = app(TenantContext::class)->id();
+
+            if (! $task instanceof Task || $task->origin !== 'manual'
+                || $user === null || $organizationId === null
+                || $user->roleIn($organizationId) !== 'manager') {
+                return;
+            }
+
+            $companyId = array_key_exists('company_id', $this->all())
+                ? $this->input('company_id')
+                : $task->company_id;
+            $company = $companyId === null ? null : Company::query()->visibleTo($user)->find((int) $companyId);
+
+            if ($companyId !== null && $company === null) {
+                $validator->errors()->add('company_id', 'A empresa está fora das equipes que você administra.');
+            }
+
+            if (! array_key_exists('assigned_to', $this->all())
+                || (int) $this->input('assigned_to') === $task->assigned_to) {
+                return;
+            }
+
+            $assigneeId = (int) $this->input('assigned_to');
+            $isSelf = $assigneeId === $user->id;
+            $isSellerInCompanyTeam = $company !== null && DB::table('team_memberships')
+                ->where('organization_id', $organizationId)
+                ->where('team_id', $company->team_id)
+                ->where('user_id', $assigneeId)
+                ->where('role', 'salesperson')
+                ->where('is_active', true)
+                ->exists();
+            $isSellerInManagedTeam = $company === null && DB::table('team_memberships')
+                ->join('teams', 'teams.id', '=', 'team_memberships.team_id')
+                ->where('team_memberships.organization_id', $organizationId)
+                ->where('team_memberships.user_id', $assigneeId)
+                ->where('team_memberships.role', 'salesperson')
+                ->where('team_memberships.is_active', true)
+                ->where('teams.status', 'active')
+                ->whereExists(fn ($teams) => $teams->selectRaw('1')
+                    ->from('team_memberships as manager_memberships')
+                    ->whereColumn('manager_memberships.team_id', 'teams.id')
+                    ->whereColumn('manager_memberships.organization_id', 'teams.organization_id')
+                    ->where('manager_memberships.user_id', $user->id)
+                    ->where('manager_memberships.role', 'manager')
+                    ->where('manager_memberships.is_active', true))
+                ->exists();
+
+            if (! $isSelf && ! $isSellerInCompanyTeam && ! $isSellerInManagedTeam) {
+                $validator->errors()->add('assigned_to', 'A tarefa só pode ser atribuída a você ou a um vendedor das equipes que administra.');
+            }
+        }];
     }
 }

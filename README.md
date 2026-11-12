@@ -27,7 +27,14 @@ Plataforma SaaS B2B para organizar o relacionamento comercial, acompanhar empres
 - Jornadas configuráveis de pós-venda e reativação integradas ao motor existente.
 - Dashboard com indicadores comerciais persistidos, distribuição de faixas e lista de empresas que precisam de atenção.
 
-O roadmap ainda registra como pendente validar concorrência em PostgreSQL, processos de fila, Scheduler, Mailpit e um fluxo E2E com Docker. Consulte [docs/roadmap.md](docs/roadmap.md) para o estado atualizado.
+### Fase 4 — Equipes e gestão
+
+- Equipes com gestores e vendedores, memberships preservadas e escopo hierárquico sem compartilhamento de carteira entre vendedores.
+- Convites com token armazenado em hash, expiração, reenvio, revogação e aceite por usuário existente ou por novo cadastro verificado.
+- Distribuição e transferência individual ou em lote da carteira, com histórico e atualização de tarefas automáticas aplicáveis.
+- Dashboard de gestores e relatórios paginados de atividades, relacionamento, classificação comercial e vendas confirmadas.
+
+As migrations e a suíte completa foram validadas em PostgreSQL. A Fase 4 também validou um worker Redis com retentativa de e-mail, Scheduler idempotente, aceite concorrente de convite, entrega no Mailpit e seis fluxos E2E no Chromium. Consulte [docs/roadmap.md](docs/roadmap.md) para o estado atualizado.
 
 ## Tecnologias
 
@@ -74,23 +81,27 @@ O seeder cria somente dados fictícios para desenvolvimento. A conta de demonstr
 ```powershell
 composer test
 npm run check
+npm run types:check
 npm run build
+npm run test:e2e
 ```
 
 `composer test` executa Pint em modo de verificação, Larastan e Pest. `npm run check` executa as verificações de frontend configuradas pelo Vite+. `composer ci:check` combina as verificações de frontend e backend.
 
+Os testes E2E usam Chromium e um banco SQLite temporário, criado e removido pelo harness. Instale o navegador uma vez com `npx playwright install chromium`; os convites de teste são enviados ao Mailpit local.
+
 ## Fluxo de desenvolvimento
 
-A branch `main` representa o estado estável. Cada fase nova deve começar em uma branch `feature/` atualizada a partir de `main` e ser integrada de volta após revisão. Após integrar a Fase 3, inicie a Fase 4:
+A branch `main` representa o estado estável. Cada fase nova deve começar em uma branch `feature/` atualizada a partir de `main` e ser integrada de volta após revisão. Após integrar a Fase 4, inicie a próxima fase:
 
 ```powershell
 git switch main
 git pull --ff-only origin main
-git switch -c feature/phase-4-team-management
-git push -u origin feature/phase-4-team-management
+git switch -c feature/phase-5-saas-readiness
+git push -u origin feature/phase-5-saas-readiness
 ```
 
-Depois, use `feature/phase-5-onboarding` ao iniciar a Fase 5. Crie cada branch quando for iniciar a respectiva fase.
+Crie cada branch quando for iniciar a respectiva fase.
 
 ## Documentação
 

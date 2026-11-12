@@ -8,4 +8,9 @@ use Illuminate\Database\Eloquent\Relations\Pivot;
 class OrganizationMembership extends Pivot
 {
     protected $table = 'organization_user';
+
+    protected function casts(): array
+    {
+        return ['is_active' => 'boolean'];
+    }
 }

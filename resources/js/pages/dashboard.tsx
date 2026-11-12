@@ -19,7 +19,9 @@ import {
     show as showCompany,
 } from '@/actions/App/Http/Controllers/CompanyController';
 import DashboardController from '@/actions/App/Http/Controllers/DashboardController';
+import CommercialReportController from '@/actions/App/Http/Controllers/CommercialReportController';
 import { show as showTask } from '@/actions/App/Http/Controllers/TaskController';
+import { Button } from '@/components/ui/button';
 import type { BreadcrumbItem } from '@/types';
 
 type Activity = {
@@ -111,6 +113,7 @@ export default function Dashboard({
     commercialMetrics,
     commercialAttention,
     commercialTimezone,
+    managerReport,
 }: {
     metrics: {
         companies: number;
@@ -126,6 +129,24 @@ export default function Dashboard({
     commercialMetrics: CommercialMetrics;
     commercialAttention: CommercialAttention[];
     commercialTimezone: string;
+    managerReport: {
+        summary: {
+            tasks: { completion_rate: number };
+            sales: { revenue: string };
+            active_journeys: number;
+        };
+        sellerPerformance: {
+            data: {
+                id: number;
+                name: string;
+                portfolio: number;
+                tasks: { overdue: number; completion_rate: number };
+                commercially_inactive: number;
+                sales_count: number;
+                revenue: string;
+            }[];
+        };
+    } | null;
 }) {
     const { auth, activeOrganization } = usePage().props;
     const firstName = auth.user?.name?.split(' ')[0] ?? 'olá';
@@ -155,6 +176,93 @@ export default function Dashboard({
                         </span>
                     </div>
                 </section>
+
+                {managerReport && (
+                    <section className="overflow-hidden rounded-2xl border border-border/70 bg-card">
+                        <div className="flex flex-col gap-2 border-b border-border/70 px-5 py-5 sm:flex-row sm:items-center sm:justify-between md:px-6">
+                            <div>
+                                <h2 className="font-semibold tracking-tight">
+                                    Desempenho das equipes que você administra
+                                </h2>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                    Visão do mês atual, limitada às suas
+                                    equipes.
+                                </p>
+                            </div>
+                            <Link
+                                href={CommercialReportController.url()}
+                                className="inline-flex items-center gap-2 text-sm font-medium text-primary hover:underline"
+                            >
+                                Abrir relatórios{' '}
+                                <ArrowRight className="size-4" />
+                            </Link>
+                        </div>
+                        {managerReport.sellerPerformance.data.length === 0 ? (
+                            <p className="px-6 py-8 text-sm text-muted-foreground">
+                                Nenhuma equipe ativa foi vinculada ao seu
+                                perfil.
+                            </p>
+                        ) : (
+                            <div className="overflow-x-auto">
+                                <table className="w-full min-w-[760px] text-left text-sm">
+                                    <thead className="bg-muted/40 text-xs text-muted-foreground uppercase">
+                                        <tr>
+                                            {[
+                                                'Vendedor',
+                                                'Carteira',
+                                                'Atrasadas',
+                                                'Clientes inativos',
+                                                'Taxa de conclusão',
+                                                'Vendas no mês',
+                                            ].map((heading) => (
+                                                <th
+                                                    key={heading}
+                                                    className="px-4 py-3 font-medium"
+                                                >
+                                                    {heading}
+                                                </th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-border/60">
+                                        {managerReport.sellerPerformance.data.map(
+                                            (seller) => (
+                                                <tr key={seller.id}>
+                                                    <td className="px-4 py-3 font-medium">
+                                                        {seller.name}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        {seller.portfolio}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        {seller.tasks.overdue}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        {
+                                                            seller.commercially_inactive
+                                                        }
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        {seller.tasks.completion_rate.toLocaleString(
+                                                            'pt-BR',
+                                                        )}
+                                                        %
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        {seller.sales_count} ·{' '}
+                                                        {moneyLabel(
+                                                            seller.revenue,
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            ),
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </section>
+                )}
 
                 <section
                     className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"

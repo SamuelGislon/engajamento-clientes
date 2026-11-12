@@ -3,6 +3,7 @@
 namespace App\Policies;
 
 use App\Domain\Tenancy\TenantContext;
+use App\Models\Company;
 use App\Models\Sale;
 use App\Models\User;
 
@@ -22,8 +23,7 @@ class SalePolicy
     public function view(User $user, Sale $sale): bool
     {
         return $this->viewAny($user)
-            && ($user->roleIn(app(TenantContext::class)->id()) !== 'salesperson'
-                || $sale->company?->owner_user_id === $user->id);
+            && Sale::query()->visibleTo($user)->whereKey($sale->id)->exists();
     }
 
     /**
@@ -77,8 +77,23 @@ class SalePolicy
             return false;
         }
 
-        return $user->roleIn(app(TenantContext::class)->id()) !== 'salesperson'
-            || $sale->seller_id === $user->id
-            || $sale->created_by === $user->id;
+        $role = $user->roleIn(app(TenantContext::class)->id());
+
+        if ($role === 'manager') {
+            return Company::query()
+                ->visibleTo($user)
+                ->whereKey($sale->company_id)
+                ->exists();
+        }
+
+        if ($role !== 'salesperson') {
+            return true;
+        }
+
+        return ($sale->seller_id === $user->id || $sale->created_by === $user->id)
+            && Company::query()
+                ->visibleTo($user)
+                ->whereKey($sale->company_id)
+                ->exists();
     }
 }

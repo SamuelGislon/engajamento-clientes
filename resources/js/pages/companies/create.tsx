@@ -11,15 +11,20 @@ import { Label } from '@/components/ui/label';
 import { Spinner } from '@/components/ui/spinner';
 import type { BreadcrumbItem } from '@/types';
 
-type Member = { id: number; name: string };
+type Member = { id: number; name: string; team_ids: number[] };
+type TeamOption = { id: number; name: string };
 type Status = { value: string; label: string };
 
 export default function CompanyCreate({
     members,
+    teams,
     statuses,
+    canLeaveUnassignedTeam,
 }: {
     members: Member[];
+    teams: TeamOption[];
     statuses: Status[];
+    canLeaveUnassignedTeam: boolean;
 }) {
     const form = useForm({
         name: '',
@@ -36,6 +41,7 @@ export default function CompanyCreate({
         relationship_status: 'prospect',
         lead_source: '',
         owner_user_id: '',
+        team_id: '',
         notes: '',
     });
 
@@ -319,6 +325,55 @@ export default function CompanyCreate({
                                 />
                             </Field>
                             <Field
+                                label="Equipe principal"
+                                id="team_id"
+                                error={form.errors.team_id}
+                            >
+                                <select
+                                    id="team_id"
+                                    value={form.data.team_id}
+                                    onChange={(event) => {
+                                        form.setData(
+                                            'team_id',
+                                            event.target.value,
+                                        );
+                                        const teamId = Number(
+                                            event.target.value,
+                                        );
+                                        if (
+                                            form.data.owner_user_id &&
+                                            !members
+                                                .find(
+                                                    (member) =>
+                                                        member.id ===
+                                                        Number(
+                                                            form.data
+                                                                .owner_user_id,
+                                                        ),
+                                                )
+                                                ?.team_ids.includes(teamId)
+                                        ) {
+                                            form.setData('owner_user_id', '');
+                                        }
+                                    }}
+                                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                                >
+                                    {canLeaveUnassignedTeam && (
+                                        <option value="">Sem equipe</option>
+                                    )}
+                                    {!canLeaveUnassignedTeam && (
+                                        <option value="">
+                                            Selecione uma equipe
+                                        </option>
+                                    )}
+                                    {teams.map((team) => (
+                                        <option key={team.id} value={team.id}>
+                                            {team.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </Field>
+                            <Field
                                 label="Vendedor responsável"
                                 id="owner_user_id"
                                 error={form.errors.owner_user_id}
@@ -338,14 +393,22 @@ export default function CompanyCreate({
                                     <option value="">
                                         Sem responsável definido
                                     </option>
-                                    {members.map((member) => (
-                                        <option
-                                            key={member.id}
-                                            value={member.id}
-                                        >
-                                            {member.name}
-                                        </option>
-                                    ))}
+                                    {members
+                                        .filter(
+                                            (member) =>
+                                                !form.data.team_id ||
+                                                member.team_ids.includes(
+                                                    Number(form.data.team_id),
+                                                ),
+                                        )
+                                        .map((member) => (
+                                            <option
+                                                key={member.id}
+                                                value={member.id}
+                                            >
+                                                {member.name}
+                                            </option>
+                                        ))}
                                 </select>
                             </Field>
                             <Field

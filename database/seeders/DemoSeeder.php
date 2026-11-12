@@ -14,6 +14,7 @@ use App\Models\JourneyTemplate;
 use App\Models\Organization;
 use App\Models\Sale;
 use App\Models\Task;
+use App\Models\Team;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Seeder;
@@ -35,8 +36,11 @@ class DemoSeeder extends Seeder
         $members = [
             'owner@example.test' => ['name' => 'Camila Proprietária', 'role' => 'owner'],
             'manager@example.test' => ['name' => 'Pedro Gestor', 'role' => 'manager'],
+            'manager.sul@example.test' => ['name' => 'Mariana Souza', 'role' => 'manager'],
             'ana@example.test' => ['name' => 'Ana Costa', 'role' => 'salesperson'],
             'bruno@example.test' => ['name' => 'Bruno Lima', 'role' => 'salesperson'],
+            'carlos@example.test' => ['name' => 'Carlos Mendes', 'role' => 'salesperson'],
+            'daniela@example.test' => ['name' => 'Daniela Rocha', 'role' => 'salesperson'],
         ];
 
         foreach ($members as $email => $attributes) {
@@ -55,10 +59,31 @@ class DemoSeeder extends Seeder
         }
 
         $owner = User::where('email', 'owner@example.test')->firstOrFail();
+        $manager = User::where('email', 'manager@example.test')->firstOrFail();
+        $secondManager = User::where('email', 'manager.sul@example.test')->firstOrFail();
         $ana = User::where('email', 'ana@example.test')->firstOrFail();
         $bruno = User::where('email', 'bruno@example.test')->firstOrFail();
+        $carlos = User::where('email', 'carlos@example.test')->firstOrFail();
+        $daniela = User::where('email', 'daniela@example.test')->firstOrFail();
 
         app(TenantContext::class)->set($organization);
+        $architectureTeam = $organization->teams()->firstOrCreate(
+            ['name' => 'Equipe Norte'],
+            ['created_by' => $owner->id],
+        );
+        $projectsTeam = $organization->teams()->firstOrCreate(
+            ['name' => 'Equipe Sul'],
+            ['created_by' => $owner->id],
+        );
+        $architectureTeam->update(['status' => 'active']);
+        $projectsTeam->update(['status' => 'active']);
+        $this->syncDemoTeamMember($architectureTeam, $manager, 'manager', $organization->id);
+        $this->syncDemoTeamMember($architectureTeam, $ana, 'salesperson', $organization->id);
+        $this->syncDemoTeamMember($architectureTeam, $carlos, 'salesperson', $organization->id);
+        $this->syncDemoTeamMember($projectsTeam, $secondManager, 'manager', $organization->id);
+        $this->syncDemoTeamMember($projectsTeam, $bruno, 'salesperson', $organization->id);
+        $this->syncDemoTeamMember($projectsTeam, $daniela, 'salesperson', $organization->id);
+
         $journeys = app(JourneyService::class);
         $journeys->ensureDefaultTemplate($organization);
 
@@ -72,6 +97,7 @@ class DemoSeeder extends Seeder
                 'relationship_status' => 'customer',
                 'lead_source' => 'Indicação',
                 'owner_user_id' => $ana->id,
+                'team_id' => $architectureTeam->id,
                 'phone' => '+55 11 4000-1200',
                 'email' => 'contato@horizonte.example.test',
                 'notes' => 'Relacionamento importante para projetos residenciais.',
@@ -87,6 +113,7 @@ class DemoSeeder extends Seeder
                 'relationship_status' => 'prospect',
                 'lead_source' => 'Evento profissional',
                 'owner_user_id' => $ana->id,
+                'team_id' => $architectureTeam->id,
             ],
         );
         $journeys->enrollDefaultForProspect($vale, $ana);
@@ -100,6 +127,7 @@ class DemoSeeder extends Seeder
                 'relationship_status' => 'customer',
                 'lead_source' => 'Prospecção',
                 'owner_user_id' => $bruno->id,
+                'team_id' => $projectsTeam->id,
             ],
         );
 
@@ -112,6 +140,7 @@ class DemoSeeder extends Seeder
                 'relationship_status' => 'customer',
                 'lead_source' => 'Indicação',
                 'owner_user_id' => $bruno->id,
+                'team_id' => $projectsTeam->id,
             ],
         );
         $recomeco = Company::firstOrCreate(
@@ -123,6 +152,7 @@ class DemoSeeder extends Seeder
                 'relationship_status' => 'customer',
                 'lead_source' => 'Indicação',
                 'owner_user_id' => $ana->id,
+                'team_id' => $architectureTeam->id,
             ],
         );
         $crescente = Company::firstOrCreate(
@@ -134,8 +164,39 @@ class DemoSeeder extends Seeder
                 'relationship_status' => 'customer',
                 'lead_source' => 'Evento profissional',
                 'owner_user_id' => $bruno->id,
+                'team_id' => $projectsTeam->id,
             ],
         );
+        $boreal = Company::firstOrCreate(
+            ['organization_id' => $organization->id, 'name' => 'Escritório Boreal'],
+            [
+                'segment' => 'Arquitetura',
+                'city' => 'Jundiaí',
+                'state' => 'SP',
+                'relationship_status' => 'prospect',
+                'lead_source' => 'Indicação',
+                'owner_user_id' => $carlos->id,
+            ],
+        );
+        $porto = Company::firstOrCreate(
+            ['organization_id' => $organization->id, 'name' => 'Ateliê Porto'],
+            [
+                'segment' => 'Design de interiores',
+                'city' => 'Santos',
+                'state' => 'SP',
+                'relationship_status' => 'customer',
+                'lead_source' => 'Evento profissional',
+                'owner_user_id' => $daniela->id,
+            ],
+        );
+        $horizonte->update(['team_id' => $architectureTeam->id]);
+        $vale->update(['team_id' => $architectureTeam->id]);
+        $recomeco->update(['team_id' => $architectureTeam->id]);
+        $aurora->update(['team_id' => $projectsTeam->id]);
+        $brisa->update(['team_id' => $projectsTeam->id]);
+        $crescente->update(['team_id' => $projectsTeam->id]);
+        $boreal->update(['team_id' => $architectureTeam->id]);
+        $porto->update(['team_id' => $projectsTeam->id]);
 
         Task::query()->firstOrCreate(
             ['company_id' => $aurora->id, 'title' => 'Enviar amostras solicitadas'],
@@ -315,6 +376,18 @@ class DemoSeeder extends Seeder
         $this->seedReactivationHistory($organization, $reactivated, $ana, $creator);
 
         app(JourneyService::class)->enrollDefaultForProspect($prospect, $ana);
+    }
+
+    private function syncDemoTeamMember(Team $team, User $user, string $role, int $organizationId): void
+    {
+        $team->users()->syncWithoutDetaching([
+            $user->id => [
+                'organization_id' => $organizationId,
+                'role' => $role,
+                'is_active' => true,
+                'joined_at' => now(),
+            ],
+        ]);
     }
 
     private function recordSale(

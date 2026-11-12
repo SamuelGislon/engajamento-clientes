@@ -74,6 +74,28 @@ it('completes a task without recording a fictitious interaction', function () {
     expect(Activity::query()->count())->toBe(0);
 });
 
+it('selects the active organization before resolving a task route binding', function () {
+    $organization = Organization::factory()->create();
+    $seller = User::factory()->create();
+    $organization->users()->attach($seller, ['role' => 'salesperson']);
+    app(TenantContext::class)->set($organization);
+    $task = Task::factory()->create([
+        'organization_id' => $organization->id,
+        'assigned_to' => $seller->id,
+        'created_by' => $seller->id,
+        'title' => 'Concluir tarefa após resolver o tenant',
+    ]);
+
+    app()->instance(TenantContext::class, new TenantContext);
+
+    $response = $this->actingAs($seller)
+        ->withSession(['active_organization_id' => $organization->id])
+        ->post(route('tasks.complete', $task));
+
+    $response->assertRedirect(route('tasks.index'));
+    expect($task->fresh()->status)->toBe('completed');
+});
+
 it('rejects a company from another organization when creating a task', function () {
     $organization = Organization::factory()->create();
     $otherOrganization = Organization::factory()->create();
@@ -206,7 +228,7 @@ it('limits a salesperson task list to their assigned portfolio', function () {
         );
 });
 
-it('lets a manager view tasks across the organization', function () {
+it('limits a manager to tasks in the teams they manage', function () {
     $organization = Organization::factory()->create();
     $manager = User::factory()->create();
     $firstSeller = User::factory()->create();
@@ -215,14 +237,19 @@ it('lets a manager view tasks across the organization', function () {
     $organization->users()->attach($firstSeller, ['role' => 'salesperson']);
     $organization->users()->attach($secondSeller, ['role' => 'salesperson']);
     app(TenantContext::class)->set($organization);
-    $firstCompany = Company::factory()->ownedBy($firstSeller)->create(['organization_id' => $organization->id]);
-    $secondCompany = Company::factory()->ownedBy($secondSeller)->create(['organization_id' => $organization->id]);
-    foreach ([[$firstSeller, $firstCompany], [$secondSeller, $secondCompany]] as [$assignee, $company]) {
+    $team = createManagedTeam($organization, $manager, 'Equipe Gerenciada');
+    assignTeamMember($organization, $team, $firstSeller, 'salesperson');
+    $otherTeam = $organization->teams()->create(['name' => 'Equipe Externa', 'created_by' => $manager->id]);
+    assignTeamMember($organization, $otherTeam, $secondSeller, 'salesperson');
+    $firstCompany = Company::factory()->ownedBy($firstSeller)->create(['organization_id' => $organization->id, 'team_id' => $team->id]);
+    $secondCompany = Company::factory()->ownedBy($secondSeller)->create(['organization_id' => $organization->id, 'team_id' => $otherTeam->id]);
+    foreach ([[$firstSeller, $firstCompany, 'Tarefa da equipe'], [$secondSeller, $secondCompany, 'Tarefa externa']] as [$assignee, $company, $title]) {
         Task::factory()->create([
             'organization_id' => $organization->id,
             'company_id' => $company->id,
             'assigned_to' => $assignee->id,
             'created_by' => $manager->id,
+            'title' => $title,
         ]);
     }
 
@@ -233,7 +260,8 @@ it('lets a manager view tasks across the organization', function () {
 
     $response->assertOk()->assertInertia(fn (AssertableInertia $page) => $page
         ->component('tasks/index')
-        ->has('tasks.data', 2));
+        ->has('tasks.data', 1)
+        ->where('tasks.data.0.title', 'Tarefa da equipe'));
 });
 
 it('postpones an open task to a new due date', function () {
@@ -324,11 +352,20 @@ it('updates an authorized manual task', function () {
 it('accepts a revised due date and resets reminder markers', function () {
     $organization = Organization::factory()->create();
     $manager = User::factory()->create();
+    $seller = User::factory()->create();
     $organization->users()->attach($manager, ['role' => 'manager']);
+    $organization->users()->attach($seller, ['role' => 'salesperson']);
     app(TenantContext::class)->set($organization);
+    $team = createManagedTeam($organization, $manager);
+    assignTeamMember($organization, $team, $seller, 'salesperson');
+    $company = Company::factory()->ownedBy($seller)->create([
+        'organization_id' => $organization->id,
+        'team_id' => $team->id,
+    ]);
     $task = Task::factory()->create([
         'organization_id' => $organization->id,
-        'assigned_to' => $manager->id,
+        'company_id' => $company->id,
+        'assigned_to' => $seller->id,
         'created_by' => $manager->id,
         'due_at' => now()->addDay(),
         'due_soon_notified_at' => now(),
@@ -438,7 +475,9 @@ it('notifies a new assignee when a manual task is reassigned', function () {
     $organization->users()->attach($manager, ['role' => 'manager']);
     $organization->users()->attach($seller, ['role' => 'salesperson']);
     app(TenantContext::class)->set($organization);
-    $company = Company::factory()->create(['organization_id' => $organization->id]);
+    $team = createManagedTeam($organization, $manager);
+    assignTeamMember($organization, $team, $seller, 'salesperson');
+    $company = Company::factory()->create(['organization_id' => $organization->id, 'team_id' => $team->id]);
     $task = Task::factory()->create([
         'organization_id' => $organization->id,
         'company_id' => $company->id,

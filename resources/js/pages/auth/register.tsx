@@ -11,9 +11,10 @@ import { store } from '@/routes/register';
 
 type Props = {
     passwordRules: string;
+    invitationEmail?: string | null;
 };
 
-export default function Register({ passwordRules }: Props) {
+export default function Register({ passwordRules, invitationEmail }: Props) {
     return (
         <>
             <Head title="Criar conta" />
@@ -44,23 +45,34 @@ export default function Register({ passwordRules }: Props) {
                                 />
                             </div>
 
-                            <div className="grid gap-2">
-                                <Label htmlFor="organization_name">
-                                    Nome da empresa
-                                </Label>
-                                <Input
-                                    id="organization_name"
-                                    type="text"
-                                    required
-                                    tabIndex={2}
-                                    autoComplete="organization"
-                                    name="organization_name"
-                                    placeholder="Sua empresa ou workspace"
-                                />
-                                <InputError
-                                    message={errors.organization_name}
-                                />
-                            </div>
+                            {invitationEmail ? (
+                                <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
+                                    Após verificar seu e-mail, você poderá
+                                    aceitar o convite enviado para{' '}
+                                    <strong className="text-foreground">
+                                        {invitationEmail}
+                                    </strong>
+                                    .
+                                </p>
+                            ) : (
+                                <div className="grid gap-2">
+                                    <Label htmlFor="organization_name">
+                                        Nome da empresa
+                                    </Label>
+                                    <Input
+                                        id="organization_name"
+                                        type="text"
+                                        required
+                                        tabIndex={2}
+                                        autoComplete="organization"
+                                        name="organization_name"
+                                        placeholder="Sua empresa ou workspace"
+                                    />
+                                    <InputError
+                                        message={errors.organization_name}
+                                    />
+                                </div>
+                            )}
 
                             <div className="grid gap-2">
                                 <Label htmlFor="email">E-mail</Label>
@@ -71,6 +83,8 @@ export default function Register({ passwordRules }: Props) {
                                     tabIndex={3}
                                     autoComplete="email"
                                     name="email"
+                                    defaultValue={invitationEmail ?? ''}
+                                    readOnly={!!invitationEmail}
                                     placeholder="voce@empresa.com.br"
                                 />
                                 <InputError message={errors.email} />
@@ -115,7 +129,9 @@ export default function Register({ passwordRules }: Props) {
                                 data-test="register-user-button"
                             >
                                 {processing && <Spinner />}
-                                Criar workspace
+                                {invitationEmail
+                                    ? 'Criar conta para aceitar o convite'
+                                    : 'Criar workspace'}
                             </Button>
                         </div>
 

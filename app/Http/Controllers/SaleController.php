@@ -6,6 +6,7 @@ use App\Domain\Commercial\CommercialInactivityService;
 use App\Domain\Commercial\CommercialSettingsService;
 use App\Domain\Commercial\CustomerScoreService;
 use App\Domain\Journeys\JourneyService;
+use App\Domain\Teams\CommercialAccessScope;
 use App\Domain\Tenancy\TenantContext;
 use App\Http\Requests\IndexSalesRequest;
 use App\Http\Requests\StoreSaleRequest;
@@ -51,7 +52,13 @@ class SaleController extends Controller
             ->orderBy('name')
             ->get(['id', 'name']);
         $sellers = $organization->users()
+            ->where('organization_user.role', 'salesperson')
+            ->where('organization_user.is_active', true)
             ->when($user->roleIn($organization->id) === 'salesperson', fn ($query) => $query->where('users.id', $user->id))
+            ->when($user->roleIn($organization->id) === 'manager', fn ($query) => $query->whereIn(
+                'users.id',
+                app(CommercialAccessScope::class)->managedSellerIds($user, $organization->id),
+            ))
             ->orderBy('name')
             ->get(['users.id', 'users.name']);
 
@@ -79,6 +86,7 @@ class SaleController extends Controller
 
         DB::transaction(function () use ($attributes, $company, $scores, $inactivity, $journeys, $settingsService, $request): void {
             $lockedCompany = Company::query()->lockForUpdate()->findOrFail($company->id);
+            $attributes['team_id_at_sale'] = $lockedCompany->team_id;
             $isFirstPurchase = $lockedCompany->relationship_status === 'prospect'
                 && ! $lockedCompany->sales()->where('status', 'confirmed')->exists();
             $lockedCompany->sales()->create($attributes);
