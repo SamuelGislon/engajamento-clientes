@@ -71,6 +71,12 @@ class User extends Authenticatable implements MustVerifyEmail, PasskeyUser
         return $this->hasMany(Activity::class);
     }
 
+    /** @return HasMany<Sale, $this> */
+    public function sales(): HasMany
+    {
+        return $this->hasMany(Sale::class, 'seller_id');
+    }
+
     public function roleIn(?int $organizationId): ?string
     {
         if ($organizationId === null) {

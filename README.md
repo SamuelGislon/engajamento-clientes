@@ -19,7 +19,15 @@ Plataforma SaaS B2B para organizar o relacionamento comercial, acompanhar empres
 - Notificações internas, e-mail de atribuição após commit e Scheduler para lembretes de tarefas.
 - Telas de jornadas, detalhe da empresa, dashboard e central de notificações.
 
-O roadmap ainda registra como pendente a validação de concorrência em PostgreSQL e dos processos de fila, Scheduler e Mailpit com Docker. Consulte [docs/roadmap.md](docs/roadmap.md) para o estado atualizado.
+### Fase 3 — Inteligência comercial
+
+- Registro de vendas confirmadas e canceladas, com histórico por empresa, filtros, paginação e totais calculados a partir de compras confirmadas.
+- Identificação separada de clientes sem compras recentes e empresas sem contato registrado; tarefas automáticas deduplicadas com intervalo configurável.
+- Classificação comercial com critérios automáticos e manuais, composição explicada e histórico de evolução.
+- Jornadas configuráveis de pós-venda e reativação integradas ao motor existente.
+- Dashboard com indicadores comerciais persistidos, distribuição de faixas e lista de empresas que precisam de atenção.
+
+O roadmap ainda registra como pendente validar concorrência em PostgreSQL, processos de fila, Scheduler, Mailpit e um fluxo E2E com Docker. Consulte [docs/roadmap.md](docs/roadmap.md) para o estado atualizado.
 
 ## Tecnologias
 
@@ -73,16 +81,16 @@ npm run build
 
 ## Fluxo de desenvolvimento
 
-A branch `main` representa o estado estável. Cada fase nova deve começar em uma branch `feature/` atualizada a partir de `main` e ser integrada de volta após revisão. Para iniciar a Fase 3:
+A branch `main` representa o estado estável. Cada fase nova deve começar em uma branch `feature/` atualizada a partir de `main` e ser integrada de volta após revisão. Após integrar a Fase 3, inicie a Fase 4:
 
 ```powershell
 git switch main
 git pull --ff-only origin main
-git switch -c feature/phase-3-commercial-intelligence
-git push -u origin feature/phase-3-commercial-intelligence
+git switch -c feature/phase-4-team-management
+git push -u origin feature/phase-4-team-management
 ```
 
-Os nomes planejados para as fases seguintes são `feature/phase-4-team-management` e `feature/phase-5-onboarding`. Crie cada branch quando for iniciar a respectiva fase.
+Depois, use `feature/phase-5-onboarding` ao iniciar a Fase 5. Crie cada branch quando for iniciar a respectiva fase.
 
 ## Documentação
 

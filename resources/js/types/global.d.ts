@@ -15,6 +15,7 @@ declare module '@inertiajs/core' {
                 id: number;
                 name: string;
                 timezone: string;
+                role: string;
             } | null;
             organizations: { id: number; name: string; role: string }[];
             sidebarOpen: boolean;

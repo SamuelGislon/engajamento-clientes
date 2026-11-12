@@ -1,12 +1,15 @@
 <?php
 
+use App\Http\Controllers\CommercialSettingsController;
 use App\Http\Controllers\CompanyController;
 use App\Http\Controllers\ContactController;
+use App\Http\Controllers\CustomerScoreController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\JourneyEnrollmentController;
 use App\Http\Controllers\JourneyTemplateController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\OrganizationSwitchController;
+use App\Http\Controllers\SaleController;
 use App\Http\Controllers\TaskController;
 use App\Http\Middleware\EnsureOrganizationSelected;
 use Illuminate\Support\Facades\Route;
@@ -18,6 +21,11 @@ Route::middleware(['auth', 'verified'])->group(function (): void {
 
     Route::middleware(EnsureOrganizationSelected::class)->group(function (): void {
         Route::get('/dashboard', DashboardController::class)->name('dashboard');
+        Route::get('/commercial-settings', [CommercialSettingsController::class, 'edit'])->name('commercial-settings.edit');
+        Route::patch('/commercial-settings', [CommercialSettingsController::class, 'update'])->name('commercial-settings.update');
+        Route::get('/sales', [SaleController::class, 'index'])->name('sales.index');
+        Route::get('/commercial/classification', [CustomerScoreController::class, 'index'])->name('commercial.classification.index');
+        Route::get('/sales/{sale}/edit', [SaleController::class, 'edit'])->whereNumber('sale')->name('sales.edit');
         Route::get('/notifications', [NotificationController::class, 'index'])->name('notifications.index');
         Route::post('/notifications/{notification}/open', [NotificationController::class, 'open'])->name('notifications.open');
         Route::post('/notifications/{notification}/read', [NotificationController::class, 'markRead'])->name('notifications.read');
@@ -49,6 +57,10 @@ Route::middleware(['auth', 'verified'])->group(function (): void {
         Route::patch('/companies/{company}/owner', [CompanyController::class, 'updateOwner'])->whereNumber('company')->name('companies.owner.update');
         Route::post('/companies/{company}/activities', [CompanyController::class, 'storeActivity'])->whereNumber('company')->name('companies.activities.store');
         Route::post('/companies/{company}/contacts', [CompanyController::class, 'attachContact'])->whereNumber('company')->name('companies.contacts.store');
+        Route::post('/companies/{company}/sales', [SaleController::class, 'store'])->whereNumber('company')->name('companies.sales.store');
+        Route::patch('/companies/{company}/commercial-score', [CustomerScoreController::class, 'update'])->whereNumber('company')->name('companies.commercial-score.update');
+        Route::patch('/sales/{sale}', [SaleController::class, 'update'])->whereNumber('sale')->name('sales.update');
+        Route::post('/sales/{sale}/cancel', [SaleController::class, 'cancel'])->whereNumber('sale')->name('sales.cancel');
 
         Route::get('/contacts', [ContactController::class, 'index'])->name('contacts.index');
         Route::get('/contacts/create', [ContactController::class, 'create'])->name('contacts.create');

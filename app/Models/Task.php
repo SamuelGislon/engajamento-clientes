@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
  * @property int $id
@@ -90,6 +91,12 @@ class Task extends Model
     public function journeyStepExecution(): BelongsTo
     {
         return $this->belongsTo(JourneyStepExecution::class);
+    }
+
+    /** @return HasMany<CommercialAlertOccurrence, $this> */
+    public function commercialAlertOccurrences(): HasMany
+    {
+        return $this->hasMany(CommercialAlertOccurrence::class);
     }
 
     /**

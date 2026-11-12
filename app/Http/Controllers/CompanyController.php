@@ -2,7 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Domain\Commercial\CommercialInactivityService;
+use App\Domain\Commercial\CustomerScoreService;
 use App\Domain\Journeys\JourneyService;
+use App\Domain\Sales\SalesMetrics;
 use App\Domain\Tenancy\TenantContext;
 use App\Enums\OrganizationRole;
 use App\Http\Requests\StoreActivityRequest;
@@ -11,6 +14,7 @@ use App\Models\Company;
 use App\Models\Contact;
 use App\Models\JourneyEnrollment;
 use App\Models\JourneyTemplate;
+use App\Models\Sale;
 use App\Models\Task;
 use App\Models\User;
 use Illuminate\Http\RedirectResponse;
@@ -66,7 +70,7 @@ class CompanyController
         ]);
     }
 
-    public function store(StoreCompanyRequest $request, JourneyService $journeys): RedirectResponse
+    public function store(StoreCompanyRequest $request, JourneyService $journeys, CustomerScoreService $scores): RedirectResponse
     {
         $attributes = $request->validated();
         $user = $request->user();
@@ -75,9 +79,10 @@ class CompanyController
             $attributes['owner_user_id'] = $user->id;
         }
 
-        $company = DB::transaction(function () use ($attributes, $user, $journeys): Company {
+        $company = DB::transaction(function () use ($attributes, $user, $journeys, $scores): Company {
             $company = Company::create($attributes);
             $journeys->enrollDefaultForProspect($company, $user);
+            $scores->recalculateForCompany($company, 'Empresa cadastrada');
 
             return $company;
         });
@@ -88,7 +93,7 @@ class CompanyController
     public function show(Request $request, int $company): Response
     {
         $record = Company::query()
-            ->with(['owner:id,name', 'contacts', 'activities' => fn ($query) => $query
+            ->with(['owner:id,name', 'contacts', 'customerScore', 'activities' => fn ($query) => $query
                 ->with(['contact:id,name', 'user:id,name'])
                 ->limit(20)])
             ->findOrFail($company);
@@ -121,6 +126,17 @@ class CompanyController
             ->orderBy('due_at')
             ->limit(20)
             ->get();
+        $sales = Sale::query()
+            ->where('company_id', $record->id)
+            ->with('seller:id,name')
+            ->latest('sold_at')
+            ->limit(10)
+            ->get()
+            ->each(function (Sale $sale) use ($user): void {
+                $sale->setAttribute('can_manage', $user->can('update', $sale));
+            });
+        $scoreHistory = $record->customerScoreHistory()->limit(10)->get();
+        $salesTimezone = app(TenantContext::class)->organization()->timezone;
 
         return Inertia::render('companies/show', [
             'company' => $record,
@@ -129,11 +145,20 @@ class CompanyController
             'journeys' => $journeys,
             'availableJourneys' => $availableJourneys,
             'tasks' => $tasks,
+            'sales' => $sales,
+            'salesSummary' => app(SalesMetrics::class)->forCompany($record),
+            'salesTimezone' => $salesTimezone,
+            'customerScore' => $record->customerScore,
+            'scoreHistory' => $scoreHistory,
         ]);
     }
 
-    public function updateOwner(Request $request, int $company, JourneyService $journeys): RedirectResponse
-    {
+    public function updateOwner(
+        Request $request,
+        int $company,
+        JourneyService $journeys,
+        CommercialInactivityService $inactivity,
+    ): RedirectResponse {
         $record = Company::findOrFail($company);
         Gate::authorize('update', $record);
 
@@ -149,7 +174,7 @@ class CompanyController
 
         $validated = $request->validate(['owner_user_id' => $ownerRule]);
 
-        DB::transaction(function () use ($record, $validated, $request, $journeys): void {
+        DB::transaction(function () use ($record, $validated, $request, $journeys, $inactivity): void {
             $locked = Company::query()->lockForUpdate()->findOrFail($record->id);
             $newOwnerId = isset($validated['owner_user_id']) ? (int) $validated['owner_user_id'] : null;
             $ownerChanged = $locked->owner_user_id !== $newOwnerId;
@@ -157,13 +182,14 @@ class CompanyController
 
             if ($ownerChanged) {
                 $journeys->reassignOpenTasks($locked, $newOwnerId, $request->user());
+                $inactivity->reassignOpenStandaloneTasks($locked, $newOwnerId, $request->user());
             }
         });
 
         return back()->with('success', 'Responsável atualizado.');
     }
 
-    public function storeActivity(StoreActivityRequest $request, int $company): RedirectResponse
+    public function storeActivity(StoreActivityRequest $request, int $company, CommercialInactivityService $inactivity): RedirectResponse
     {
         $record = Company::findOrFail($company);
         Gate::authorize('update', $record);
@@ -172,6 +198,7 @@ class CompanyController
             ...$request->validated(),
             'user_id' => $request->user()->id,
         ]);
+        $inactivity->resolveRelationshipForCompany($record);
 
         return redirect()->route('companies.show', $record->id)->with('success', 'Interação registrada no histórico.');
     }

@@ -36,13 +36,18 @@ class HandleInertiaRequests extends Middleware
      */
     public function share(Request $request): array
     {
+        $activeOrganization = app(TenantContext::class)->organization();
+
         return [
             ...parent::share($request),
             'name' => config('app.name'),
             'auth' => [
                 'user' => $request->user(),
             ],
-            'activeOrganization' => app(TenantContext::class)->organization()?->only(['id', 'name', 'timezone']),
+            'activeOrganization' => $activeOrganization === null ? null : [
+                ...$activeOrganization->only(['id', 'name', 'timezone']),
+                'role' => $request->user()?->roleIn($activeOrganization->id),
+            ],
             'organizations' => fn () => $request->user()?->organizations()
                 ->orderBy('name')
                 ->get(['organizations.id', 'organizations.name'])

@@ -9,6 +9,7 @@ import {
     MessageSquareText,
     Phone,
     Plus,
+    ShoppingBag,
     UserRound,
     UsersRound,
 } from 'lucide-react';
@@ -19,6 +20,7 @@ import {
     storeActivity,
     updateOwner,
 } from '@/actions/App/Http/Controllers/CompanyController';
+import { update as updateCommercialScore } from '@/actions/App/Http/Controllers/CustomerScoreController';
 import { create as createContact } from '@/actions/App/Http/Controllers/ContactController';
 import { store as startJourney } from '@/actions/App/Http/Controllers/JourneyEnrollmentController';
 import {
@@ -27,6 +29,10 @@ import {
     cancel as cancelJourney,
 } from '@/actions/App/Http/Controllers/JourneyEnrollmentController';
 import { show as showTask } from '@/actions/App/Http/Controllers/TaskController';
+import {
+    cancel as cancelSale,
+    store as storeSale,
+} from '@/actions/App/Http/Controllers/SaleController';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -98,6 +104,44 @@ type Journey = {
     }[];
 };
 type JourneyOption = { id: number; name: string };
+type Sale = {
+    id: number;
+    description: string;
+    amount: string;
+    currency: string;
+    sold_at: string;
+    status: 'confirmed' | 'cancelled';
+    can_manage: boolean;
+    seller: { id: number; name: string };
+};
+type SalesSummary = {
+    total_amount: string;
+    purchase_count: number;
+    average_amount: string | null;
+    last_sold_at: string | null;
+};
+type CustomerScore = {
+    volume_points: number;
+    frequency_points: number;
+    potential_points: number | null;
+    relationship_points: number | null;
+    total_score: number | null;
+    tier: string | null;
+    is_complete: boolean;
+    last_calculated_at: string | null;
+};
+type ScoreHistory = {
+    id: number;
+    volume_points: number;
+    frequency_points: number;
+    potential_points: number | null;
+    relationship_points: number | null;
+    total_score: number | null;
+    tier: string | null;
+    is_complete: boolean;
+    reason: string;
+    recorded_at: string;
+};
 
 const activityTypes = [
     ['call', 'Ligação'],
@@ -143,19 +187,32 @@ const typeLabels = Object.fromEntries(activityTypes);
 function displayDate(
     value: string | null | undefined,
     includeTime = false,
+    timeZone?: string,
 ): string {
     if (!value) return 'Ainda não registrado';
     return new Intl.DateTimeFormat(
         'pt-BR',
         includeTime
-            ? { dateStyle: 'medium', timeStyle: 'short' }
-            : { dateStyle: 'medium' },
+            ? { dateStyle: 'medium', timeStyle: 'short', timeZone }
+            : { dateStyle: 'medium', timeZone },
     ).format(new Date(value));
 }
 
-function localDateTime(): string {
-    const date = new Date(Date.now() - new Date().getTimezoneOffset() * 60_000);
-    return date.toISOString().slice(0, 16);
+function localDateTime(timeZone: string): string {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+    }).formatToParts(new Date());
+    const value = Object.fromEntries(
+        parts.map((part) => [part.type, part.value]),
+    );
+
+    return `${value.year}-${value.month}-${value.day}T${value.hour}:${value.minute}`;
 }
 
 export default function CompanyShow({
@@ -165,6 +222,11 @@ export default function CompanyShow({
     journeys,
     availableJourneys,
     tasks,
+    sales,
+    salesSummary,
+    salesTimezone,
+    customerScore,
+    scoreHistory,
 }: {
     company: Company;
     attachableContacts: AttachableContact[];
@@ -172,6 +234,11 @@ export default function CompanyShow({
     journeys: Journey[];
     availableJourneys: JourneyOption[];
     tasks: TaskItem[];
+    sales: Sale[];
+    salesSummary: SalesSummary;
+    salesTimezone: string;
+    customerScore: CustomerScore | null;
+    scoreHistory: ScoreHistory[];
 }) {
     const [owner, setOwner] = useState(String(company.owner_user_id ?? ''));
     const [newRoles, setNewRoles] = useState<string[]>([]);
@@ -183,6 +250,14 @@ export default function CompanyShow({
         result: '',
         next_action: '',
     });
+    const saleForm = useForm({
+        seller_id: String(company.owner_user_id ?? members[0]?.id ?? ''),
+        description: '',
+        amount: '',
+        currency: 'BRL',
+        sold_at: localDateTime(salesTimezone),
+        notes: '',
+    });
     const attachForm = useForm({
         contact_id: '',
         roles: newRoles,
@@ -191,6 +266,11 @@ export default function CompanyShow({
     });
     const journeyForm = useForm({
         journey_template_id: String(availableJourneys[0]?.id ?? ''),
+    });
+    const scoreForm = useForm({
+        potential_points: customerScore?.potential_points?.toString() ?? '',
+        relationship_points:
+            customerScore?.relationship_points?.toString() ?? '',
     });
     function submitActivity(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -233,6 +313,18 @@ export default function CompanyShow({
     function submitJourney(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
         journeyForm.post(startJourney.url(company.id));
+    }
+
+    function submitSale(event: React.FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        saleForm.post(storeSale.url(company.id), {
+            onSuccess: () => saleForm.reset('description', 'amount', 'notes'),
+        });
+    }
+
+    function submitCommercialScore(event: React.FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        scoreForm.patch(updateCommercialScore.url(company.id));
     }
 
     return (
@@ -290,7 +382,12 @@ export default function CompanyShow({
                                     </span>
                                     <span className="inline-flex items-center gap-2 text-muted-foreground">
                                         <CalendarClock className="size-4" />
-                                        Última compra: disponível na Fase 3
+                                        Última compra:{' '}
+                                        {displayDate(
+                                            salesSummary.last_sold_at,
+                                            false,
+                                            salesTimezone,
+                                        )}
                                     </span>
                                 </div>
                             </div>
@@ -324,6 +421,369 @@ export default function CompanyShow({
                                 Atualizar responsável
                             </Button>
                         </form>
+                    </div>
+                </section>
+
+                <section className="overflow-hidden rounded-2xl border border-border/70 bg-card">
+                    <div className="flex flex-col gap-4 border-b border-border/70 px-5 py-5 sm:flex-row sm:items-center sm:justify-between md:px-6">
+                        <div>
+                            <h2 className="flex items-center gap-2 font-semibold">
+                                <ShoppingBag className="size-4 text-primary" />
+                                Resumo de compras
+                            </h2>
+                            <p className="mt-1 text-sm text-muted-foreground">
+                                Apenas compras confirmadas entram nos totais;
+                                cancelamentos continuam no histórico.
+                            </p>
+                        </div>
+                        <details className="group">
+                            <summary className="flex h-9 cursor-pointer list-none items-center justify-center rounded-md border border-input px-3 text-sm font-medium hover:bg-muted">
+                                Registrar compra
+                            </summary>
+                            <form
+                                onSubmit={submitSale}
+                                className="mt-4 grid gap-3 rounded-xl border border-border/70 bg-muted/20 p-4 sm:grid-cols-2 xl:grid-cols-3"
+                            >
+                                <Field label="Vendedor" id="sale-seller">
+                                    <select
+                                        id="sale-seller"
+                                        value={saleForm.data.seller_id}
+                                        onChange={(event) =>
+                                            saleForm.setData(
+                                                'seller_id',
+                                                event.target.value,
+                                            )
+                                        }
+                                        className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                                    >
+                                        {members.map((member) => (
+                                            <option
+                                                key={member.id}
+                                                value={member.id}
+                                            >
+                                                {member.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <InputError
+                                        message={saleForm.errors.seller_id}
+                                    />
+                                </Field>
+                                <Field
+                                    label="Descrição"
+                                    id="sale-description"
+                                    error={saleForm.errors.description}
+                                    required
+                                >
+                                    <Input
+                                        id="sale-description"
+                                        value={saleForm.data.description}
+                                        onChange={(event) =>
+                                            saleForm.setData(
+                                                'description',
+                                                event.target.value,
+                                            )
+                                        }
+                                        maxLength={255}
+                                        required
+                                    />
+                                </Field>
+                                <Field
+                                    label="Valor (R$)"
+                                    id="sale-amount"
+                                    error={saleForm.errors.amount}
+                                    required
+                                >
+                                    <Input
+                                        id="sale-amount"
+                                        type="number"
+                                        min="0.01"
+                                        step="0.01"
+                                        value={saleForm.data.amount}
+                                        onChange={(event) =>
+                                            saleForm.setData(
+                                                'amount',
+                                                event.target.value,
+                                            )
+                                        }
+                                        required
+                                    />
+                                </Field>
+                                <Field
+                                    label="Data da compra"
+                                    id="sale-sold-at"
+                                    error={saleForm.errors.sold_at}
+                                    required
+                                >
+                                    <Input
+                                        id="sale-sold-at"
+                                        type="datetime-local"
+                                        value={saleForm.data.sold_at}
+                                        onChange={(event) =>
+                                            saleForm.setData(
+                                                'sold_at',
+                                                event.target.value,
+                                            )
+                                        }
+                                        required
+                                    />
+                                </Field>
+                                <Field
+                                    label="Observações"
+                                    id="sale-notes"
+                                    error={saleForm.errors.notes}
+                                >
+                                    <Input
+                                        id="sale-notes"
+                                        value={saleForm.data.notes}
+                                        onChange={(event) =>
+                                            saleForm.setData(
+                                                'notes',
+                                                event.target.value,
+                                            )
+                                        }
+                                        maxLength={5000}
+                                    />
+                                </Field>
+                                <div className="flex items-end">
+                                    <Button
+                                        type="submit"
+                                        disabled={saleForm.processing}
+                                    >
+                                        Confirmar compra
+                                    </Button>
+                                </div>
+                            </form>
+                        </details>
+                    </div>
+                    <div className="grid gap-3 border-b border-border/70 p-5 sm:grid-cols-2 md:px-6 xl:grid-cols-4">
+                        <CommercialMetric
+                            label="Total comprado"
+                            value={money(salesSummary.total_amount)}
+                        />
+                        <CommercialMetric
+                            label="Compras confirmadas"
+                            value={salesSummary.purchase_count.toString()}
+                        />
+                        <CommercialMetric
+                            label="Ticket médio"
+                            value={
+                                salesSummary.average_amount
+                                    ? money(salesSummary.average_amount)
+                                    : '—'
+                            }
+                        />
+                        <CommercialMetric
+                            label="Última compra"
+                            value={displayDate(salesSummary.last_sold_at)}
+                        />
+                    </div>
+                    {sales.length === 0 ? (
+                        <p className="px-5 py-7 text-sm text-muted-foreground md:px-6">
+                            Nenhuma compra registrada. Prospectos sem compras
+                            permanecem identificados como prospectos.
+                        </p>
+                    ) : (
+                        <ul className="divide-y divide-border/60">
+                            {sales.map((sale) => (
+                                <li
+                                    key={sale.id}
+                                    className="flex flex-col justify-between gap-3 px-5 py-4 sm:flex-row sm:items-center md:px-6"
+                                >
+                                    <div>
+                                        <p className="text-sm font-medium">
+                                            {sale.description}
+                                        </p>
+                                        <p className="mt-1 text-xs text-muted-foreground">
+                                            {sale.seller.name} ·{' '}
+                                            {displayDate(
+                                                sale.sold_at,
+                                                false,
+                                                salesTimezone,
+                                            )}
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <span className="font-medium tabular-nums">
+                                            {money(sale.amount)}
+                                        </span>
+                                        <span
+                                            className={`rounded-full px-2.5 py-1 text-xs font-medium ${sale.status === 'confirmed' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-200' : 'bg-muted text-muted-foreground'}`}
+                                        >
+                                            {sale.status === 'confirmed'
+                                                ? 'Confirmada'
+                                                : 'Cancelada'}
+                                        </span>
+                                        {sale.can_manage &&
+                                            sale.status === 'confirmed' && (
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="ghost"
+                                                    onClick={() =>
+                                                        router.post(
+                                                            cancelSale.url(
+                                                                sale.id,
+                                                            ),
+                                                        )
+                                                    }
+                                                >
+                                                    Cancelar
+                                                </Button>
+                                            )}
+                                    </div>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </section>
+
+                <section className="grid gap-5 xl:grid-cols-[1fr_0.85fr]">
+                    <div className="rounded-2xl border border-border/70 bg-card p-5 md:p-6">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                                <h2 className="font-semibold tracking-tight">
+                                    Classificação comercial
+                                </h2>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                    Volume e frequência vêm das compras
+                                    confirmadas nos últimos 12 meses. Os
+                                    critérios manuais completam a nota.
+                                </p>
+                            </div>
+                            <span className="rounded-full bg-muted px-3 py-1 text-sm font-semibold">
+                                {customerScore?.is_complete
+                                    ? `Faixa ${customerScore.tier} · ${customerScore.total_score}/100`
+                                    : 'Dados incompletos'}
+                            </span>
+                        </div>
+                        <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                            <CommercialMetric
+                                label="Volume · até 40"
+                                value={`${customerScore?.volume_points ?? 0} pts`}
+                            />
+                            <CommercialMetric
+                                label="Frequência · até 20"
+                                value={`${customerScore?.frequency_points ?? 0} pts`}
+                            />
+                            <CommercialMetric
+                                label="Potencial · até 20"
+                                value={
+                                    customerScore?.potential_points === null ||
+                                    customerScore?.potential_points ===
+                                        undefined
+                                        ? 'Pendente'
+                                        : `${customerScore.potential_points} pts`
+                                }
+                            />
+                            <CommercialMetric
+                                label="Relacionamento · até 20"
+                                value={
+                                    customerScore?.relationship_points ===
+                                        null ||
+                                    customerScore?.relationship_points ===
+                                        undefined
+                                        ? 'Pendente'
+                                        : `${customerScore.relationship_points} pts`
+                                }
+                            />
+                        </div>
+                        <form
+                            onSubmit={submitCommercialScore}
+                            className="mt-5 grid gap-4 sm:grid-cols-2"
+                        >
+                            <label className="grid gap-2 text-sm font-medium">
+                                Potencial comercial (0–20)
+                                <Input
+                                    type="number"
+                                    min="0"
+                                    max="20"
+                                    step="1"
+                                    value={scoreForm.data.potential_points}
+                                    onChange={(event) =>
+                                        scoreForm.setData(
+                                            'potential_points',
+                                            event.target.value,
+                                        )
+                                    }
+                                />
+                                <InputError
+                                    message={scoreForm.errors.potential_points}
+                                />
+                            </label>
+                            <label className="grid gap-2 text-sm font-medium">
+                                Facilidade de acesso e relacionamento (0–20)
+                                <Input
+                                    type="number"
+                                    min="0"
+                                    max="20"
+                                    step="1"
+                                    value={scoreForm.data.relationship_points}
+                                    onChange={(event) =>
+                                        scoreForm.setData(
+                                            'relationship_points',
+                                            event.target.value,
+                                        )
+                                    }
+                                />
+                                <InputError
+                                    message={
+                                        scoreForm.errors.relationship_points
+                                    }
+                                />
+                            </label>
+                            <div className="sm:col-span-2">
+                                <Button
+                                    type="submit"
+                                    disabled={scoreForm.processing}
+                                >
+                                    Salvar critérios e recalcular
+                                </Button>
+                            </div>
+                        </form>
+                        {!customerScore?.is_complete && (
+                            <p className="mt-3 text-sm text-muted-foreground">
+                                A faixa final fica pendente até que os dois
+                                critérios manuais sejam preenchidos.
+                            </p>
+                        )}
+                    </div>
+                    <div className="rounded-2xl border border-border/70 bg-card p-5 md:p-6">
+                        <h2 className="font-semibold tracking-tight">
+                            Evolução da classificação
+                        </h2>
+                        {scoreHistory.length === 0 ? (
+                            <p className="mt-3 text-sm text-muted-foreground">
+                                Ainda não há avaliações registradas.
+                            </p>
+                        ) : (
+                            <ol className="mt-4 divide-y divide-border/60">
+                                {scoreHistory.map((entry) => (
+                                    <li
+                                        key={entry.id}
+                                        className="py-3 first:pt-0 last:pb-0"
+                                    >
+                                        <div className="flex items-center justify-between gap-3 text-sm">
+                                            <span className="font-medium">
+                                                {entry.is_complete
+                                                    ? `Faixa ${entry.tier} · ${entry.total_score}/100`
+                                                    : 'Classificação incompleta'}
+                                            </span>
+                                            <span className="text-xs text-muted-foreground">
+                                                {displayDate(
+                                                    entry.recorded_at,
+                                                    false,
+                                                    salesTimezone,
+                                                )}
+                                            </span>
+                                        </div>
+                                        <p className="mt-1 text-xs text-muted-foreground">
+                                            {entry.reason}
+                                        </p>
+                                    </li>
+                                ))}
+                            </ol>
+                        )}
                     </div>
                 </section>
 
@@ -1097,6 +1557,22 @@ export default function CompanyShow({
                 </div>
             </main>
         </>
+    );
+}
+
+function money(value: string): string {
+    return new Intl.NumberFormat('pt-BR', {
+        style: 'currency',
+        currency: 'BRL',
+    }).format(Number(value));
+}
+
+function CommercialMetric({ label, value }: { label: string; value: string }) {
+    return (
+        <div className="rounded-xl border border-border/70 bg-background p-4">
+            <p className="text-xs text-muted-foreground">{label}</p>
+            <p className="mt-2 text-lg font-semibold tracking-tight">{value}</p>
+        </div>
     );
 }
 

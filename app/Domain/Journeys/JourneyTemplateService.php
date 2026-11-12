@@ -27,7 +27,9 @@ class JourneyTemplateService
 
             $steps = Arr::pull($attributes, 'steps');
             $isActive = (bool) $attributes['is_active'];
-            $isDefault = (bool) $attributes['is_default'] && $isActive;
+            $type = $attributes['type'] ?? 'prospecting';
+            $triggerType = $attributes['trigger_type'] ?? ($type === 'prospecting' ? 'manual' : null);
+            $isDefault = $type === 'prospecting' && (bool) $attributes['is_default'] && $isActive;
 
             if ($isDefault) {
                 JourneyTemplate::query()
@@ -39,8 +41,8 @@ class JourneyTemplateService
             $template ??= new JourneyTemplate;
             $template->fill([
                 ...$attributes,
-                'type' => 'prospecting',
-                'trigger_type' => $isDefault ? 'company_created' : 'manual',
+                'type' => $type,
+                'trigger_type' => $isDefault ? 'company_created' : $triggerType,
                 'is_default' => $isDefault,
             ]);
             $template->save();

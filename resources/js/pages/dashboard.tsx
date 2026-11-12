@@ -9,6 +9,9 @@ import {
     MessageSquareText,
     Sparkles,
     Route,
+    ShoppingBag,
+    DollarSign,
+    RotateCcw,
 } from 'lucide-react';
 import {
     create as createCompany,
@@ -16,6 +19,7 @@ import {
     show as showCompany,
 } from '@/actions/App/Http/Controllers/CompanyController';
 import DashboardController from '@/actions/App/Http/Controllers/DashboardController';
+import { show as showTask } from '@/actions/App/Http/Controllers/TaskController';
 import type { BreadcrumbItem } from '@/types';
 
 type Activity = {
@@ -33,6 +37,32 @@ type Company = {
     name: string;
     relationship_status: string;
     activities_max_occurred_at: string | null;
+};
+type CommercialMetrics = {
+    customers_with_purchases: number;
+    prospects_without_purchases: number;
+    commercially_inactive: number;
+    without_recent_contact: number;
+    reactivated_this_period: number;
+    confirmed_sales_period: number;
+    revenue_period: string;
+    average_ticket_period: string | null;
+    tier_distribution: Record<'A' | 'B' | 'C' | 'D', number>;
+    pending_reactivation_tasks: number;
+};
+type CommercialAttention = {
+    id: number;
+    type: 'commercial_inactivity' | 'relationship_inactivity';
+    reason: string;
+    first_detected_at: string;
+    company: { id: number; name: string };
+    owner: { id: number; name: string } | null;
+    tier: string | null;
+    last_purchase_at: string | null;
+    last_contact_at: string | null;
+    suggested_action: string;
+    recommended_contact: { id: number; name: string } | null;
+    task: { id: number; title: string; type: string; can_view: boolean } | null;
 };
 
 const typeLabels: Record<string, string> = {
@@ -59,17 +89,28 @@ const breadcrumbs: BreadcrumbItem[] = [
     { title: 'Visão geral', href: DashboardController.url() },
 ];
 
-function dateLabel(value: string | null): string {
+function dateLabel(value: string | null, timeZone?: string): string {
     if (!value) return 'Nenhuma interação registrada';
-    return new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium' }).format(
-        new Date(value),
-    );
+    return new Intl.DateTimeFormat('pt-BR', {
+        dateStyle: 'medium',
+        timeZone,
+    }).format(new Date(value));
+}
+
+function moneyLabel(value: string): string {
+    return new Intl.NumberFormat('pt-BR', {
+        style: 'currency',
+        currency: 'BRL',
+    }).format(Number(value));
 }
 
 export default function Dashboard({
     metrics,
     recentActivities,
     attentionCompanies,
+    commercialMetrics,
+    commercialAttention,
+    commercialTimezone,
 }: {
     metrics: {
         companies: number;
@@ -82,6 +123,9 @@ export default function Dashboard({
     };
     recentActivities: Activity[];
     attentionCompanies: Company[];
+    commercialMetrics: CommercialMetrics;
+    commercialAttention: CommercialAttention[];
+    commercialTimezone: string;
 }) {
     const { auth, activeOrganization } = usePage().props;
     const firstName = auth.user?.name?.split(' ')[0] ?? 'olá';
@@ -158,6 +202,206 @@ export default function Dashboard({
                         detail="Inscrições em andamento ou pausadas"
                         icon={Route}
                     />
+                </section>
+
+                <section
+                    className="flex flex-col gap-5"
+                    aria-label="Inteligência comercial"
+                >
+                    <div>
+                        <h2 className="text-xl font-semibold tracking-tight">
+                            Inteligência comercial
+                        </h2>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                            Indicadores calculados a partir das vendas e
+                            interações registradas.
+                        </p>
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                        <Metric
+                            label="Clientes com compras"
+                            value={commercialMetrics.customers_with_purchases}
+                            detail="Empresas com venda confirmada"
+                            icon={ShoppingBag}
+                        />
+                        <Metric
+                            label="Prospectos sem compras"
+                            value={
+                                commercialMetrics.prospects_without_purchases
+                            }
+                            detail="Ainda não são clientes inativos"
+                            icon={Sparkles}
+                        />
+                        <Metric
+                            label="Clientes sem compras recentes"
+                            value={commercialMetrics.commercially_inactive}
+                            detail="Acima do intervalo da organização"
+                            icon={AlertTriangle}
+                        />
+                        <Metric
+                            label="Sem contato recente"
+                            value={commercialMetrics.without_recent_contact}
+                            detail="Interações comerciais vencidas"
+                            icon={MessageSquareText}
+                        />
+                        <Metric
+                            label="Reativados neste mês"
+                            value={commercialMetrics.reactivated_this_period}
+                            detail="Voltaram a comprar após alerta"
+                            icon={RotateCcw}
+                        />
+                        <Metric
+                            label="Vendas confirmadas"
+                            value={commercialMetrics.confirmed_sales_period}
+                            detail="No mês atual da organização"
+                            icon={ShoppingBag}
+                        />
+                        <Metric
+                            label="Faturamento registrado"
+                            value={moneyLabel(commercialMetrics.revenue_period)}
+                            detail="Vendas confirmadas no mês"
+                            icon={DollarSign}
+                        />
+                        <Metric
+                            label="Ticket médio"
+                            value={
+                                commercialMetrics.average_ticket_period
+                                    ? moneyLabel(
+                                          commercialMetrics.average_ticket_period,
+                                      )
+                                    : '—'
+                            }
+                            detail="No mês atual da organização"
+                            icon={DollarSign}
+                        />
+                        <Metric
+                            label="Reativações pendentes"
+                            value={commercialMetrics.pending_reactivation_tasks}
+                            detail="Tarefas automáticas abertas"
+                            icon={ListTodo}
+                        />
+                        <div className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm shadow-black/[0.02] sm:col-span-2 xl:col-span-3">
+                            <p className="text-sm text-muted-foreground">
+                                Distribuição por faixa
+                            </p>
+                            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                {(['A', 'B', 'C', 'D'] as const).map((tier) => (
+                                    <div
+                                        key={tier}
+                                        className="rounded-xl bg-muted/50 px-4 py-3"
+                                    >
+                                        <p className="text-xs text-muted-foreground">
+                                            Faixa {tier}
+                                        </p>
+                                        <p className="mt-1 text-xl font-semibold">
+                                            {commercialMetrics.tier_distribution[
+                                                tier
+                                            ].toLocaleString('pt-BR')}
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section className="overflow-hidden rounded-2xl border border-border/70 bg-card">
+                    <div className="border-b border-border/70 px-5 py-5 md:px-6">
+                        <h2 className="font-semibold tracking-tight">
+                            Clientes que precisam de atenção
+                        </h2>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                            Alertas de compra e relacionamento com a próxima
+                            ação sugerida.
+                        </p>
+                    </div>
+                    {commercialAttention.length === 0 ? (
+                        <p className="px-6 py-8 text-sm text-muted-foreground">
+                            Nenhum alerta comercial ativo para sua carteira.
+                        </p>
+                    ) : (
+                        <div className="divide-y divide-border/60">
+                            {commercialAttention.map((item) => (
+                                <article
+                                    key={item.id}
+                                    className="grid gap-4 px-5 py-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:px-6"
+                                >
+                                    <div className="min-w-0">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <Link
+                                                href={showCompany.url(
+                                                    item.company.id,
+                                                )}
+                                                className="font-semibold hover:text-primary hover:underline"
+                                            >
+                                                {item.company.name}
+                                            </Link>
+                                            {item.tier && (
+                                                <span className="rounded-full bg-muted px-2.5 py-1 text-xs font-medium">
+                                                    Faixa {item.tier}
+                                                </span>
+                                            )}
+                                            <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                                                {item.type ===
+                                                'commercial_inactivity'
+                                                    ? 'Sem compras recentes'
+                                                    : 'Sem contato recente'}
+                                            </span>
+                                        </div>
+                                        <p className="mt-2 text-sm text-muted-foreground">
+                                            {item.reason}
+                                        </p>
+                                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                                            <span>
+                                                Última compra:{' '}
+                                                {dateLabel(
+                                                    item.last_purchase_at,
+                                                    commercialTimezone,
+                                                )}
+                                            </span>
+                                            <span>
+                                                Último contato:{' '}
+                                                {dateLabel(
+                                                    item.last_contact_at,
+                                                    commercialTimezone,
+                                                )}
+                                            </span>
+                                            <span>
+                                                Responsável:{' '}
+                                                {item.owner?.name ??
+                                                    'Não definido'}
+                                            </span>
+                                            <span>
+                                                Contato recomendado:{' '}
+                                                {item.recommended_contact
+                                                    ?.name ??
+                                                    'Nenhum profissional definido'}
+                                            </span>
+                                        </div>
+                                        <p className="mt-2 text-sm font-medium">
+                                            Ação sugerida:{' '}
+                                            {item.suggested_action}
+                                        </p>
+                                    </div>
+                                    {item.task?.can_view && (
+                                        <Button
+                                            asChild
+                                            variant="outline"
+                                            className="w-fit"
+                                        >
+                                            <Link
+                                                href={showTask.url(
+                                                    item.task.id,
+                                                )}
+                                            >
+                                                Abrir tarefa
+                                            </Link>
+                                        </Button>
+                                    )}
+                                </article>
+                            ))}
+                        </div>
+                    )}
                 </section>
 
                 <section className="grid gap-5 xl:grid-cols-[1.05fr_0.95fr]">
@@ -287,7 +531,7 @@ function Metric({
     icon: Icon,
 }: {
     label: string;
-    value: number;
+    value: number | string;
     detail: string;
     icon: typeof Building2;
 }) {
@@ -297,7 +541,9 @@ function Metric({
                 <div>
                     <p className="text-sm text-muted-foreground">{label}</p>
                     <p className="mt-3 text-3xl font-semibold tracking-tight">
-                        {value.toLocaleString('pt-BR')}
+                        {typeof value === 'number'
+                            ? value.toLocaleString('pt-BR')
+                            : value}
                     </p>
                 </div>
                 <span className="flex size-10 items-center justify-center rounded-xl bg-[#edf4ef] text-[#315c4c] dark:bg-emerald-950 dark:text-emerald-200">

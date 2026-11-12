@@ -11,3 +11,4 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 Schedule::command('engagement:notify-task-deadlines')->everyFifteenMinutes();
+Schedule::command('commercial:scan-inactivity')->everyFifteenMinutes()->withoutOverlapping();
