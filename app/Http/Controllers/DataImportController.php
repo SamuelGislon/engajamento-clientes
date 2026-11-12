@@ -1,0 +1,380 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Domain\Commercial\CustomerScoreService;
+use App\Domain\Imports\CompanyImportFields;
+use App\Domain\Imports\CompanyImportService;
+use App\Domain\Imports\ImportFileException;
+use App\Domain\Imports\SpreadsheetPreviewReader;
+use App\Domain\Teams\CommercialAccessScope;
+use App\Domain\Tenancy\TenantContext;
+use App\Http\Requests\SaveDataImportMappingRequest;
+use App\Http\Requests\StoreDataImportRequest;
+use App\Models\Company;
+use App\Models\DataImport;
+use App\Models\Organization;
+use App\Models\Team;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+use Inertia\Inertia;
+use Inertia\Response;
+use Throwable;
+
+class DataImportController extends Controller
+{
+    public function index(Request $request): Response
+    {
+        Gate::authorize('viewAny', DataImport::class);
+
+        $user = $request->user();
+        $organizationId = app(TenantContext::class)->id();
+        $role = $user->roleIn($organizationId);
+        $canViewAll = in_array($role, ['owner', 'admin'], true);
+
+        return Inertia::render('imports/index', [
+            'imports' => DataImport::query()
+                ->with('creator:id,name')
+                ->when(! $canViewAll, fn ($imports) => $imports->where('created_by', $user->id))
+                ->latest()
+                ->paginate(15)
+                ->through(fn (DataImport $dataImport): array => [
+                    'id' => $dataImport->id,
+                    'record_type' => $dataImport->record_type,
+                    'status' => $dataImport->status,
+                    'original_filename' => $dataImport->original_filename,
+                    'journey_mode' => $dataImport->journey_mode,
+                    'total_rows' => $dataImport->total_rows,
+                    'valid_rows' => $dataImport->valid_rows,
+                    'invalid_rows' => $dataImport->invalid_rows,
+                    'created_rows' => $dataImport->created_rows,
+                    'updated_rows' => $dataImport->updated_rows,
+                    'skipped_rows' => $dataImport->skipped_rows,
+                    'duplicate_rows' => $dataImport->duplicate_rows,
+                    'expires_at' => $dataImport->expires_at->toIso8601String(),
+                    'creator' => $dataImport->creator?->only(['id', 'name']),
+                ]),
+            'role' => $role,
+            'teams' => Team::query()
+                ->where('status', 'active')
+                ->when($role === 'manager', fn ($teams) => $teams->whereIn(
+                    'id',
+                    app(CommercialAccessScope::class)->managedTeamIds($user, $organizationId),
+                ))
+                ->when($role === 'salesperson', fn ($teams) => $teams->whereHas('users', fn ($members) => $members
+                    ->where('users.id', $user->id)
+                    ->where('team_memberships.role', 'salesperson')
+                    ->where('team_memberships.is_active', true)))
+                ->orderBy('name')
+                ->get(['id', 'name']),
+        ]);
+    }
+
+    public function store(StoreDataImportRequest $request): RedirectResponse
+    {
+        $organization = app(TenantContext::class)->organization();
+        abort_if($organization === null, 403);
+
+        $attributes = $request->validated();
+        $file = $request->file('file');
+        $path = $file->store('imports/'.$organization->id, 'local');
+
+        if ($path === false) {
+            throw ValidationException::withMessages(['file' => 'Não foi possível armazenar o arquivo com segurança.']);
+        }
+
+        try {
+            DB::transaction(function () use ($request, $attributes, $file, $path): void {
+                $originalFilename = basename(str_replace('\\', '/', $file->getClientOriginalName()));
+                $originalFilename = preg_replace('/[\x00-\x1F\x7F]/u', '', $originalFilename) ?? 'arquivo';
+
+                DataImport::create([
+                    'created_by' => $request->user()->id,
+                    'team_id' => $attributes['team_id'] ?? null,
+                    'record_type' => $attributes['record_type'],
+                    'status' => 'uploaded',
+                    'original_filename' => mb_substr($originalFilename, 0, 255),
+                    'disk' => 'local',
+                    'file_path' => $path,
+                    'journey_mode' => $attributes['journey_mode'],
+                    'journey_template_id' => $attributes['journey_template_id'] ?? null,
+                    'expires_at' => now()->addHours(24),
+                ]);
+            });
+        } catch (Throwable $exception) {
+            Storage::disk('local')->delete($path);
+
+            throw $exception;
+        }
+
+        return redirect()->route('imports.index')->with('success', 'Arquivo recebido. Revise os dados antes de confirmar a importação.');
+    }
+
+    public function show(int $dataImport, SpreadsheetPreviewReader $previewReader): Response
+    {
+        $record = DataImport::query()->findOrFail($dataImport);
+        Gate::authorize('view', $record);
+
+        $organizationId = app(TenantContext::class)->id();
+        $expectedPathPrefix = 'imports/'.$organizationId.'/';
+
+        if ($record->disk !== 'local' || ! Str::startsWith($record->file_path, $expectedPathPrefix)) {
+            abort(404);
+        }
+
+        $preview = null;
+        $fileError = null;
+
+        try {
+            $preview = $this->previewRecord($record, $previewReader);
+        } catch (ImportFileException $exception) {
+            $fileError = $exception->getMessage();
+        }
+
+        return Inertia::render('imports/show', [
+            'import' => [
+                'id' => $record->id,
+                'record_type' => $record->record_type,
+                'status' => $record->status,
+                'original_filename' => $record->original_filename,
+                'journey_mode' => $record->journey_mode,
+                'mapping' => $record->mapping,
+                'validation_errors' => $record->validation_errors ?? [],
+                'total_rows' => $record->total_rows,
+                'valid_rows' => $record->valid_rows,
+                'invalid_rows' => $record->invalid_rows,
+                'duplicate_rows' => $record->duplicate_rows,
+                'created_rows' => $record->created_rows,
+                'updated_rows' => $record->updated_rows,
+                'skipped_rows' => $record->skipped_rows,
+                'team' => $record->team?->only(['id', 'name']),
+                'expires_at' => $record->expires_at->toIso8601String(),
+            ],
+            'preview' => $preview,
+            'fileError' => $fileError,
+            'fields' => app(CompanyImportFields::class)->options(),
+        ]);
+    }
+
+    public function saveMapping(
+        SaveDataImportMappingRequest $request,
+        int $dataImport,
+        SpreadsheetPreviewReader $previewReader,
+        CompanyImportFields $companyImportFields,
+    ): RedirectResponse {
+        $record = DataImport::query()->findOrFail($dataImport);
+        Gate::authorize('update', $record);
+        if (in_array($record->status, ['completed', 'expired'], true)) {
+            throw ValidationException::withMessages(['mapping' => 'Este lote não pode mais ser alterado.']);
+        }
+
+        $preview = $this->previewRecord($record, $previewReader);
+        $mapping = array_filter(
+            $request->validated('mapping'),
+            fn (mixed $columnIndex): bool => $columnIndex !== null && $columnIndex !== '',
+        );
+        $fieldOptions = $companyImportFields->options();
+        $allowedColumns = array_keys($preview['headers']);
+        $errors = [];
+
+        foreach ($mapping as $field => $columnIndex) {
+            if (! array_key_exists($field, $fieldOptions)) {
+                $errors['mapping'] = 'O mapeamento contém um campo que não pode ser importado.';
+
+                continue;
+            }
+
+            if (! in_array((int) $columnIndex, $allowedColumns, true)) {
+                $errors['mapping.'.$field] = 'Selecione uma coluna existente na planilha.';
+            }
+        }
+
+        $normalizedMapping = array_map('intval', $mapping);
+        $duplicateColumns = array_keys(array_filter(array_count_values($normalizedMapping), fn (int $count): bool => $count > 1));
+
+        foreach ($normalizedMapping as $field => $columnIndex) {
+            if (in_array($columnIndex, $duplicateColumns, true)) {
+                $errors['mapping.'.$field] = 'Cada coluna pode ser associada a apenas um campo.';
+            }
+        }
+
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
+
+        $record->update([
+            'mapping' => $normalizedMapping,
+            'status' => 'mapped',
+            'validation_errors' => null,
+            'total_rows' => 0,
+            'valid_rows' => 0,
+            'invalid_rows' => 0,
+            'duplicate_rows' => 0,
+            'created_rows' => 0,
+            'updated_rows' => 0,
+            'skipped_rows' => 0,
+        ]);
+
+        return redirect()->route('imports.show', $record->id)->with('success', 'Mapeamento salvo para este lote.');
+    }
+
+    public function validateImport(
+        Request $request,
+        int $dataImport,
+        SpreadsheetPreviewReader $previewReader,
+        CompanyImportService $companyImports,
+    ): RedirectResponse {
+        $record = DataImport::query()->findOrFail($dataImport);
+        Gate::authorize('update', $record);
+
+        if ($record->mapping === null || $record->mapping === []) {
+            throw ValidationException::withMessages(['mapping' => 'Salve o mapeamento antes de validar as linhas.']);
+        }
+
+        if (in_array($record->status, ['completed', 'expired'], true)) {
+            throw ValidationException::withMessages(['file' => 'Este lote não pode mais ser validado.']);
+        }
+
+        try {
+            $preview = $this->previewRecord($record, $previewReader, SpreadsheetPreviewReader::MAX_ROWS);
+        } catch (ImportFileException $exception) {
+            throw ValidationException::withMessages(['file' => $exception->getMessage()]);
+        }
+
+        $analysis = $companyImports->analyze(
+            $record,
+            $request->user(),
+            $preview['rows'],
+            $preview['totalRows'],
+        );
+
+        $record->update([
+            'status' => 'validated',
+            'total_rows' => $analysis['totalRows'],
+            'valid_rows' => count($analysis['validRows']),
+            'invalid_rows' => $analysis['invalidRows'],
+            'duplicate_rows' => $analysis['duplicateRows'],
+            'validation_errors' => $analysis['errors'],
+        ]);
+
+        return redirect()->route('imports.show', $record->id)->with('success', 'Validação concluída. Revise os totais antes de confirmar.');
+    }
+
+    public function confirm(
+        Request $request,
+        int $dataImport,
+        SpreadsheetPreviewReader $previewReader,
+        CompanyImportService $companyImports,
+        CustomerScoreService $scores,
+    ): RedirectResponse {
+        $record = DataImport::query()->findOrFail($dataImport);
+        Gate::authorize('update', $record);
+
+        DB::transaction(function () use ($request, $record, $previewReader, $companyImports, $scores): void {
+            $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
+            Gate::authorize('update', $batch);
+
+            if ($batch->status === 'completed') {
+                return;
+            }
+
+            if ($batch->status !== 'validated') {
+                throw ValidationException::withMessages(['file' => 'Valide o lote antes de confirmar a importação.']);
+            }
+
+            if ($batch->mapping === null || $batch->mapping === []) {
+                throw ValidationException::withMessages(['mapping' => 'Salve o mapeamento antes de confirmar a importação.']);
+            }
+
+            Organization::query()->lockForUpdate()->findOrFail($batch->organization_id);
+            Gate::authorize('update', $batch);
+
+            try {
+                $preview = $this->previewRecord($batch, $previewReader, SpreadsheetPreviewReader::MAX_ROWS);
+            } catch (ImportFileException $exception) {
+                throw ValidationException::withMessages(['file' => $exception->getMessage()]);
+            }
+
+            $analysis = $companyImports->analyze(
+                $batch,
+                $request->user(),
+                $preview['rows'],
+                $preview['totalRows'],
+                true,
+            );
+            $createdRows = 0;
+            $raceDuplicates = 0;
+
+            foreach ($analysis['validRows'] as $row) {
+                $attributes = $row['attributes'];
+                $taxId = $attributes['tax_id'] ?? null;
+                unset($attributes['tax_id']);
+
+                if ($taxId !== null) {
+                    $company = Company::query()->firstOrCreate(
+                        ['tax_id' => $taxId],
+                        ['tax_id' => $taxId, ...$attributes],
+                    );
+
+                    if (! $company->wasRecentlyCreated) {
+                        $raceDuplicates++;
+
+                        continue;
+                    }
+                } else {
+                    $company = Company::query()->create($attributes);
+                }
+
+                $scores->recalculateForCompany($company, 'Importação de planilha');
+                $createdRows++;
+            }
+
+            $duplicateRows = $analysis['duplicateRows'] + $raceDuplicates;
+            $batch->update([
+                'status' => 'completed',
+                'total_rows' => $analysis['totalRows'],
+                'valid_rows' => count($analysis['validRows']) - $raceDuplicates,
+                'invalid_rows' => $analysis['invalidRows'],
+                'duplicate_rows' => $duplicateRows,
+                'created_rows' => $createdRows,
+                'updated_rows' => 0,
+                'skipped_rows' => $analysis['invalidRows'] + $duplicateRows,
+                'validation_errors' => $analysis['errors'],
+                'confirmed_at' => now(),
+            ]);
+        });
+
+        return redirect()->route('imports.show', $record->id)->with('success', 'Importação concluída. Confira os totais e as linhas ignoradas.');
+    }
+
+    /** @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int} */
+    private function previewRecord(DataImport $record, SpreadsheetPreviewReader $previewReader, int $sampleLimit = 10): array
+    {
+        if ($record->expires_at->isPast()) {
+            throw new ImportFileException('O arquivo temporário expirou e não pode mais ser pré-visualizado.');
+        }
+
+        $expectedPathPrefix = 'imports/'.app(TenantContext::class)->id().'/';
+
+        if ($record->disk !== 'local' || ! Str::startsWith($record->file_path, $expectedPathPrefix)) {
+            abort(404);
+        }
+
+        if (! Storage::disk('local')->exists($record->file_path)) {
+            throw new ImportFileException('O arquivo temporário não está mais disponível. Envie-o novamente para continuar.');
+        }
+
+        $format = strtolower(pathinfo($record->original_filename, PATHINFO_EXTENSION));
+
+        return $previewReader->preview(
+            Storage::disk('local')->path($record->file_path),
+            $format,
+            $sampleLimit,
+        );
+    }
+}

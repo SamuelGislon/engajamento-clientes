@@ -7,6 +7,7 @@ use App\Http\Controllers\CompanyPortfolioController;
 use App\Http\Controllers\ContactController;
 use App\Http\Controllers\CustomerScoreController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\DataImportController;
 use App\Http\Controllers\JourneyEnrollmentController;
 use App\Http\Controllers\JourneyTemplateController;
 use App\Http\Controllers\NotificationController;
@@ -34,6 +35,12 @@ Route::middleware(['auth', 'verified'])->group(function (): void {
 
     Route::middleware(EnsureOrganizationSelected::class)->group(function (): void {
         Route::get('/dashboard', DashboardController::class)->name('dashboard');
+        Route::get('/imports', [DataImportController::class, 'index'])->name('imports.index');
+        Route::post('/imports', [DataImportController::class, 'store'])->name('imports.store');
+        Route::post('/imports/{dataImport}/mapping', [DataImportController::class, 'saveMapping'])->whereNumber('dataImport')->name('imports.mapping');
+        Route::post('/imports/{dataImport}/validate', [DataImportController::class, 'validateImport'])->whereNumber('dataImport')->name('imports.validate');
+        Route::post('/imports/{dataImport}/confirm', [DataImportController::class, 'confirm'])->whereNumber('dataImport')->name('imports.confirm');
+        Route::get('/imports/{dataImport}', [DataImportController::class, 'show'])->whereNumber('dataImport')->name('imports.show');
         Route::get('/reports', CommercialReportController::class)->name('reports.index');
         Route::get('/teams', [TeamController::class, 'index'])->name('teams.index');
         Route::post('/teams', [TeamController::class, 'store'])->name('teams.store');

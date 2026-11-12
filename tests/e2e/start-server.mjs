@@ -21,7 +21,7 @@ const environment = {
     DB_DATABASE: databasePath,
     DB_URL: '',
     BCRYPT_ROUNDS: '4',
-    CACHE_STORE: 'file',
+    CACHE_STORE: 'array',
     SESSION_DRIVER: 'file',
     QUEUE_CONNECTION: 'sync',
     MAIL_MAILER: 'smtp',

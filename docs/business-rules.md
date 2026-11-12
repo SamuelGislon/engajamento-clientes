@@ -86,6 +86,17 @@ O seeder apresenta os cenários fictícios de cliente estratégico, cliente inat
 - Faturamento, quantidade, ticket e compradores usam somente vendas confirmadas. Vendas novas guardam equipe no momento da venda; registros legados sem snapshot usam a equipe atual da empresa.
 - Desempenho por vendedor usa a carteira atual e seller histórico da venda. O relatório informa explicitamente a política usada para vendas antigas.
 
-## Planejadas
+## Implementadas parcialmente na Fase 5 — Importação de empresas
 
-- Importação de vendas e integrações com ERP, fora do MVP atual.
+- O lote sempre pertence à organização ativa. O arquivo CSV/XLSX é privado, limitado a 10 MB, 100 colunas e 5.000 linhas, e expira após 24 horas.
+- O usuário precisa mapear o campo obrigatório `name`, validar todas as linhas e confirmar explicitamente. A operação é transacional e a confirmação repetida de um lote concluído não cria empresas adicionais.
+- Cada linha é validada antes da gravação. CNPJ deve conter 14 dígitos e passar nos dígitos verificadores. E-mail, site, UF, tamanhos e situação também são validados.
+- Duplicidades por CNPJ ou nome normalizado com cidade e UF são ignoradas e relatadas; não há atualização de registros existentes nem fusão automática. Sem identificador/contexto suficiente, nomes iguais não são tratados como prova de identidade.
+- Empresas novas de salesperson são atribuídas a esse vendedor. Manager precisa escolher uma equipe ativa que administra; owner/admin podem importar sem equipe ou selecionar equipe da própria organização.
+- Esta entrega suporta somente empresas. Não importa contatos, vínculos ou vendas; não inicia jornadas nem gera tarefas/notificações em massa. A confirmação é síncrona e limitada a 5.000 linhas.
+
+### Planejadas
+
+- Importação de contatos, vínculos e vendas, opções de tratamento de duplicidade, atualização controlada e processamento assíncrono por lotes.
+- Onboarding, ajustes de regras de pontuação/inatividade, exportação autorizada e auditoria consultável.
+- Integrações com ERP, fora do MVP atual.

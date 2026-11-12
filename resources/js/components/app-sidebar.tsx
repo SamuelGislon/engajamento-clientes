@@ -5,6 +5,7 @@ import {
     Building2,
     ChartNoAxesCombined,
     CircleDollarSign,
+    FileUp,
     Gauge,
     LayoutGrid,
     ListTodo,
@@ -24,6 +25,7 @@ import { index as classificationIndex } from '@/actions/App/Http/Controllers/Cus
 import { index as teamsIndex } from '@/actions/App/Http/Controllers/TeamController';
 import { index as organizationUsersIndex } from '@/actions/App/Http/Controllers/OrganizationInvitationController';
 import { index as companyPortfolioIndex } from '@/actions/App/Http/Controllers/CompanyPortfolioController';
+import { index as importsIndex } from '@/actions/App/Http/Controllers/DataImportController';
 import CommercialReportController from '@/actions/App/Http/Controllers/CommercialReportController';
 import AppLogo from '@/components/app-logo';
 import { NavMain } from '@/components/nav-main';
@@ -64,6 +66,7 @@ const mainNavItems: NavItem[] = [
     },
     { title: 'Atividades', href: tasksIndex.url(), icon: ListTodo },
     { title: 'Jornadas', href: journeysIndex.url(), icon: Route },
+    { title: 'Importar dados', href: importsIndex.url(), icon: FileUp },
     { title: 'Notificações', href: notificationsIndex.url(), icon: Bell },
     {
         title: 'Relatórios',

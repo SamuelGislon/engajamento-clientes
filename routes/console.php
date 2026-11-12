@@ -12,3 +12,4 @@ Artisan::command('inspire', function () {
 
 Schedule::command('engagement:notify-task-deadlines')->everyFifteenMinutes();
 Schedule::command('commercial:scan-inactivity')->everyFifteenMinutes()->withoutOverlapping();
+Schedule::command('data-imports:purge-expired')->hourly()->withoutOverlapping();

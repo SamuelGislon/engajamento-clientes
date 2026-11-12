@@ -116,7 +116,8 @@ test('owner creates a team, accepts an invitation, and assigns a company', async
     )?.[1];
     expect(invitationToken).toBeTruthy();
 
-    const inviteePage = await browser.newPage();
+    const inviteeContext = await browser.newContext();
+    const inviteePage = await inviteeContext.newPage();
     await inviteePage.goto(`/invitations/${invitationToken}`);
     await inviteePage
         .getByRole('link', { name: 'Entrar para aceitar' })
@@ -124,6 +125,9 @@ test('owner creates a team, accepts an invitation, and assigns a company', async
     await signIn(inviteePage, inviteeEmail, /invitations/);
     await inviteePage.getByRole('button', { name: 'Aceitar convite' }).click();
     await expect(inviteePage).toHaveURL(/dashboard/);
+    await expect(
+        page.getByRole('button', { name: /Camila Proprietária/ }),
+    ).toBeVisible();
 
     await page.goto('/companies/portfolio');
     await page.getByRole('checkbox', { name: /Ateliê Aurora/ }).check();
@@ -154,7 +158,7 @@ test('owner creates a team, accepts an invitation, and assigns a company', async
         .filter({ has: page.getByRole('checkbox', { name: /Ateliê Aurora/ }) });
     await expect(transferredCompany).toContainText('Vendedor Convidado E2E');
     await expect(transferredCompany).toContainText(teamName);
-    await inviteePage.close();
+    await inviteeContext.close();
 });
 
 test('seller records an interaction and completes a task', async ({ page }) => {

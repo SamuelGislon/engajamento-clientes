@@ -36,12 +36,20 @@ Plataforma SaaS B2B para organizar o relacionamento comercial, acompanhar empres
 
 As migrations e a suíte completa foram validadas em PostgreSQL. A Fase 4 também validou um worker Redis com retentativa de e-mail, Scheduler idempotente, aceite concorrente de convite, entrega no Mailpit e seis fluxos E2E no Chromium. Consulte [docs/roadmap.md](docs/roadmap.md) para o estado atualizado.
 
+### Fase 5 — Adoção (bloco parcial)
+
+- Importação privada de empresas por CSV e XLSX, com prévia, mapeamento de colunas, validação de linhas, detecção conservadora de duplicidades, confirmação idempotente e relatório de resultado.
+- Uploads ficam no disco privado e são limpos após 24 horas pelo Scheduler. Nesta entrega, a importação cria empresas novas; contatos, vínculos e vendas ainda não são suportados.
+- Jornadas, tarefas e notificações não são iniciadas em massa. Linhas inválidas e duplicadas são ignoradas; registros existentes não são atualizados automaticamente.
+- A Fase 5 permanece em andamento: onboarding, importação dos demais registros, exportação, auditoria e regras comerciais configuráveis ainda estão pendentes.
+
 ## Tecnologias
 
 - Laravel 13, PHP 8.3+ e Eloquent.
 - React 19, TypeScript, Inertia 3, Tailwind CSS 4 e shadcn/ui.
 - PostgreSQL 16 para dados da aplicação.
 - Redis 7 para filas e cache.
+- OpenSpout 4.32 para leitura de CSV e XLSX (`ext-zip` e `ext-xmlreader` habilitadas no PHP).
 - Vite+ para desenvolvimento, verificações e build dos ativos.
 - Docker Compose com PostgreSQL, Redis e Mailpit para serviços locais.
 
@@ -90,18 +98,30 @@ npm run test:e2e
 
 Os testes E2E usam Chromium e um banco SQLite temporário, criado e removido pelo harness. Instale o navegador uma vez com `npx playwright install chromium`; os convites de teste são enviados ao Mailpit local.
 
+Para validar apenas o fluxo de importação implementado:
+
+```powershell
+php artisan test --compact tests/Feature/DataImportTest.php tests/Feature/PurgeExpiredDataImportsTest.php
+npx playwright test tests/e2e/phase-5-import.spec.ts
+```
+
 ## Fluxo de desenvolvimento
 
-A branch `main` representa o estado estável. Cada fase nova deve começar em uma branch `feature/` atualizada a partir de `main` e ser integrada de volta após revisão. Após integrar a Fase 4, inicie a próxima fase:
+`main` representa versões estáveis. A Fase 5 está sendo desenvolvida em `feature/phase-5-saas-readiness` e deve passar por revisão antes de qualquer merge. Para retomar este trabalho:
+
+```powershell
+git switch feature/phase-5-saas-readiness
+git pull --ff-only
+```
+
+Fases futuras devem partir da `main` atualizada em uma branch própria, por exemplo:
 
 ```powershell
 git switch main
 git pull --ff-only origin main
-git switch -c feature/phase-5-saas-readiness
-git push -u origin feature/phase-5-saas-readiness
+git switch -c feature/phase-6-next-capability
+git push -u origin feature/phase-6-next-capability
 ```
-
-Crie cada branch quando for iniciar a respectiva fase.
 
 ## Documentação
 

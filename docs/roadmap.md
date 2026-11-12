@@ -40,9 +40,16 @@
 
 ## Fase 5 — Adoção e preparação comercial
 
-- [ ] Importação, onboarding, configuração de regras e exportação.
-- [ ] Auditoria, performance e preparação de cobrança.
+- [x] Base tenant-first de lotes privados para CSV/XLSX, prévia, mapeamento de empresas, validação parcial e retenção de 24 horas.
+- [x] Importação confirmada de empresas válidas, com detecção conservadora de duplicidades, resultado persistido e proteção contra repetição.
+- [ ] Importação de contatos, vínculos e vendas; escolhas de deduplicação; processamento assíncrono e controle configurável de jornadas.
+- [ ] Onboarding retomável e templates de adoção.
+- [ ] Configuração explicável de pontuação e inatividade.
+- [ ] Exportações CSV/XLSX autorizadas e downloads temporários privados.
+- [ ] Auditoria consultável de operações comerciais e administrativas.
+- [ ] Medições reprodutíveis de performance e estrutura para planos/limites sem gateway de pagamento.
+- [ ] Suítes PostgreSQL, concorrência, Redis, Scheduler, Mailpit e E2E de ponta a ponta da Fase 5.
 
 ## Pendências técnicas
 
-- A Fase 5 ainda precisa implementar importação, onboarding, exportação e auditoria; verifique o roadmap ao concluir cada bloco.
+- A Fase 5 está em andamento e o corte de importação atual é somente de empresas, síncrono e sem iniciar jornadas. Consulte os itens pendentes antes de tratar a fase como concluída.

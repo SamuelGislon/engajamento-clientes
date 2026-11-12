@@ -17,6 +17,7 @@ Aplicação monolítica modular em Laravel, organizada por domínios e servida p
 - **Commercial intelligence**: pontuação, histórico de faixas, ocorrências de inatividade, tarefas acionáveis e configurações por organização.
 - **Teams**: equipes, memberships de gestores/vendedores, escopo comercial centralizado, transferências auditáveis de carteira e convites.
 - **Reports**: agregações paginadas de atividades, relacionamento e vendas, com filtros de período/equipe/vendedor sob o mesmo escopo comercial.
+- **Imports (Fase 5 parcial)**: lotes privados de CSV/XLSX, prévia OpenSpout, mapeamento e validação de empresas, confirmação transacional/idempotente e limpeza agendada. A entrega atual é síncrona e limitada a 5.000 linhas por arquivo; contatos, vínculos, vendas e execução em fila permanecem pendentes.
 - **Dashboard**: indicadores calculados a partir de empresas, vendas, tarefas, ocorrências e inscrições persistidas; gestores recebem desempenho das equipes que administram.
 - **Auth/Settings**: autenticação e configurações herdadas do starter kit oficial.
 
@@ -79,3 +80,9 @@ Vendas novas gravam `team_id_at_sale` para preservar a atribuição histórica d
 Os prazos são calculados como dias corridos no fuso da organização e persistidos em UTC. A próxima etapa começa a contar da conclusão da etapa anterior. Tarefas manuais permanecem independentes do ciclo de vida da jornada.
 
 `TaskEventNotification` registra avisos no canal de banco de dados. `TaskAssignmentNotifier` enfileira e-mail de atribuição depois do commit. O Scheduler processa lembretes de tarefas e inatividade comercial por organização, com `TenantContext` ativo e deduplicação persistida. A troca de responsável reatribui tarefas automáticas de jornada e de inatividade; tarefas manuais preservam seu responsável. As telas consultam notificações e recursos usando o tenant e as policies vigentes.
+
+## Importação de empresas (Fase 5 parcial)
+
+`DataImportController` mantém os lotes no tenant ativo e armazena o arquivo em disco privado. `SpreadsheetPreviewReader` usa OpenSpout para CSV e XLSX, detecta separadores vírgula e ponto e vírgula em CSV e limita arquivos a 10 MB, 100 colunas e 5.000 linhas. O usuário mapeia colunas e valida as linhas antes de confirmar. A confirmação bloqueia o lote e a organização em uma transação, repete a autorização depois do lock e bloqueia a equipe/membership de destino durante a revalidação e gravação; alterações concorrentes de acesso são serializadas com a confirmação. O arquivo é revalidado e somente empresas válidas são criadas; repetir a confirmação não duplica o lote. CNPJ válido e nome normalizado com cidade/UF identificam duplicidades para ignorar; linhas sem contexto suficiente não são fundidas automaticamente. Os registros existentes não são atualizados nesta entrega.
+
+Owner/admin podem importar na organização; manager precisa selecionar uma equipe ativa que administra; salesperson só pode escolher equipe da própria membership e as empresas novas ficam atribuídas a si. A autorização usa contexto de tenant, policy do lote e chaves estrangeiras compostas. Esta etapa sempre registra `journey_mode=none`, não cria tarefas e não envia notificações em massa. O Scheduler remove o arquivo privado e os dados temporários após 24 horas, mantendo apenas contagens e erros sem valores de linha.

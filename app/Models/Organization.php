@@ -61,6 +61,12 @@ class Organization extends Model
         return $this->hasMany(Sale::class);
     }
 
+    /** @return HasMany<DataImport, $this> */
+    public function dataImports(): HasMany
+    {
+        return $this->hasMany(DataImport::class);
+    }
+
     /** @return HasOne<CommercialSetting, $this> */
     public function commercialSetting(): HasOne
     {
