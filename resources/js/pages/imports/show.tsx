@@ -21,6 +21,7 @@ type Preview = {
     headers: string[];
     rows: string[][];
     totalRows: number;
+    malformedRows: number[];
 };
 
 type ImportRecord = {
@@ -170,6 +171,19 @@ export default function ImportShow({
                             />
                         </section>
 
+                        {preview.malformedRows.length > 0 && (
+                            <p
+                                role="status"
+                                className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4 text-sm text-muted-foreground"
+                            >
+                                {preview.malformedRows.length} linhas têm
+                                valores além das colunas do cabeçalho e serão
+                                rejeitadas. Primeiras linhas:{' '}
+                                {preview.malformedRows.slice(0, 5).join(', ')}
+                                {preview.malformedRows.length > 5 ? '…' : ''}.
+                            </p>
+                        )}
+
                         <section className="overflow-hidden rounded-2xl border border-border/70 bg-card shadow-sm shadow-black/[0.02]">
                             <div className="flex flex-col gap-1 border-b border-border/70 px-5 py-4 sm:flex-row sm:items-end sm:justify-between md:px-6">
                                 <div>
@@ -265,8 +279,10 @@ export default function ImportShow({
                                 </h2>
                                 <p className="mt-1 text-sm text-muted-foreground">
                                     Escolha a coluna da planilha que corresponde
-                                    a cada campo. O nome da empresa é
-                                    obrigatório.
+                                    a cada campo.{' '}
+                                    {importRecord.record_type === 'contacts'
+                                        ? 'Associe cada linha a uma empresa acessível pelo CNPJ ou nome exato. Linhas com o mesmo e-mail ou nome e telefone iguais podem criar um contato com vários vínculos, se os dados pessoais forem compatíveis.'
+                                        : 'O nome da empresa é obrigatório.'}
                                 </p>
                             </div>
                             <div className="mt-5 grid gap-4 sm:grid-cols-2">

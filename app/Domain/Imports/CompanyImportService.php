@@ -15,6 +15,7 @@ class CompanyImportService
 {
     /**
      * @param  list<list<string>>  $rows
+     * @param  list<int>  $malformedRows
      * @return array{
      *     totalRows: int,
      *     validRows: list<array{line: int, attributes: array<string, mixed>}>,
@@ -23,7 +24,7 @@ class CompanyImportService
      *     errors: list<array{line: int, type: string, message: string}>
      * }
      */
-    public function analyze(DataImport $batch, User $actor, array $rows, int $totalRows, bool $lockDestination = false): array
+    public function analyze(DataImport $batch, User $actor, array $rows, int $totalRows, bool $lockDestination = false, array $malformedRows = []): array
     {
         $this->assertDestinationStillAuthorized($batch, $actor, $lockDestination);
         $mapping = is_array($batch->mapping) ? $batch->mapping : [];
@@ -33,6 +34,14 @@ class CompanyImportService
         $errors = [];
 
         foreach ($rows as $index => $row) {
+            $line = $index + 2;
+            if (in_array($line, $malformedRows, true)) {
+                $invalidRows++;
+                $this->appendError($errors, $line, 'invalid', 'A linha contém mais colunas do que o cabeçalho.');
+
+                continue;
+            }
+
             $attributes = $this->mappedAttributes($mapping, $fields, $row);
 
             $attributes['name'] = trim((string) ($attributes['name'] ?? ''));
@@ -77,14 +86,14 @@ class CompanyImportService
 
             if ($messages !== []) {
                 $invalidRows++;
-                $this->appendError($errors, $index + 2, 'invalid', implode(' ', array_unique($messages)));
+                $this->appendError($errors, $line, 'invalid', implode(' ', array_unique($messages)));
 
                 continue;
             }
 
             $attributes = array_filter($attributes, fn (mixed $value): bool => $value !== null);
             $candidates[] = [
-                'line' => $index + 2,
+                'line' => $line,
                 'attributes' => $attributes,
                 'keys' => $this->identityKeys($attributes),
             ];

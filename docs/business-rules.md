@@ -86,17 +86,21 @@ O seeder apresenta os cenários fictícios de cliente estratégico, cliente inat
 - Faturamento, quantidade, ticket e compradores usam somente vendas confirmadas. Vendas novas guardam equipe no momento da venda; registros legados sem snapshot usam a equipe atual da empresa.
 - Desempenho por vendedor usa a carteira atual e seller histórico da venda. O relatório informa explicitamente a política usada para vendas antigas.
 
-## Implementadas parcialmente na Fase 5 — Importação de empresas
+## Implementadas parcialmente na Fase 5 — Importação de empresas e contatos
 
 - O lote sempre pertence à organização ativa. O arquivo CSV/XLSX é privado, limitado a 10 MB, 100 colunas e 5.000 linhas, e expira após 24 horas.
 - O usuário precisa mapear o campo obrigatório `name`, validar todas as linhas e confirmar explicitamente. A operação é transacional e a confirmação repetida de um lote concluído não cria empresas adicionais.
 - Cada linha é validada antes da gravação. CNPJ deve conter 14 dígitos e passar nos dígitos verificadores. E-mail, site, UF, tamanhos e situação também são validados.
 - Duplicidades por CNPJ ou nome normalizado com cidade e UF são ignoradas e relatadas; não há atualização de registros existentes nem fusão automática. Sem identificador/contexto suficiente, nomes iguais não são tratados como prova de identidade.
 - Empresas novas de salesperson são atribuídas a esse vendedor. Manager precisa escolher uma equipe ativa que administra; owner/admin podem importar sem equipe ou selecionar equipe da própria organização.
-- Esta entrega suporta somente empresas. Não importa contatos, vínculos ou vendas; não inicia jornadas nem gera tarefas/notificações em massa. A confirmação é síncrona e limitada a 5.000 linhas.
+- Contatos exigem nome e vínculo com uma empresa já existente, identificada por CNPJ ou nome exato não ambíguo. A empresa precisa pertencer ao tenant ativo e estar visível ao ator, incluindo o escopo de carteira de vendedores e gestores.
+- Linhas com o mesmo e-mail ou nome e telefone normalizados podem representar a mesma pessoa. Campos pessoais vazios podem ser complementados por outra linha; valores preenchidos divergentes invalidam o grupo para revisão. Um contato novo pode ser associado a várias empresas, com papéis, sinalizador de contato principal e observações próprios de cada vínculo.
+- Um contato já existente e visível ao ator é relatado como duplicidade; não é alterado nem associado automaticamente. Se a identidade existe em empresa fora do escopo do ator, a linha é rejeitada com mensagem genérica para não revelar dados de outra carteira.
+- Papéis do vínculo usam os códigos da aplicação (`owner`, `partner`, `budget_manager`, `buyer`, `decision_maker`, `influencer`, `specifier`, `finance`, `operations`, `other`); papéis ausentes assumem `other`. E-mail é normalizado para minúsculas; telefone é preservado como informado e só é normalizado na comparação de identidade.
+- Esta etapa ainda não importa vendas, não oferece as escolhas de criar/atualizar/ignorar/resolver manualmente, não inicia jornadas nem gera tarefas/notificações em massa. A confirmação é síncrona e limitada a 5.000 linhas.
 
 ### Planejadas
 
-- Importação de contatos, vínculos e vendas, opções de tratamento de duplicidade, atualização controlada e processamento assíncrono por lotes.
+- Importação de vendas; escolhas de tratamento de duplicidade (`criar`, `atualizar`, `ignorar`, resolução manual); processamento assíncrono retomável por lotes e opções seguras de jornadas.
 - Onboarding, ajustes de regras de pontuação/inatividade, exportação autorizada e auditoria consultável.
 - Integrações com ERP, fora do MVP atual.

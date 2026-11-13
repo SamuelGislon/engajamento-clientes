@@ -38,10 +38,10 @@ As migrations e a suíte completa foram validadas em PostgreSQL. A Fase 4 també
 
 ### Fase 5 — Adoção (bloco parcial)
 
-- Importação privada de empresas por CSV e XLSX, com prévia, mapeamento de colunas, validação de linhas, detecção conservadora de duplicidades, confirmação idempotente e relatório de resultado.
-- Uploads ficam no disco privado e são limpos após 24 horas pelo Scheduler. Nesta entrega, a importação cria empresas novas; contatos, vínculos e vendas ainda não são suportados.
-- Jornadas, tarefas e notificações não são iniciadas em massa. Linhas inválidas e duplicadas são ignoradas; registros existentes não são atualizados automaticamente.
-- A Fase 5 permanece em andamento: onboarding, importação dos demais registros, exportação, auditoria e regras comerciais configuráveis ainda estão pendentes.
+- Importação privada de empresas e contatos por CSV/XLSX, com prévia, mapeamento, validação, confirmação transacional e relatório. Contatos podem ser associados a várias empresas acessíveis, com papéis no vínculo.
+- Uploads ficam no disco privado e são limpos após 24 horas pelo Scheduler. A importação permanece síncrona e limitada a 5.000 linhas; vendas e processamento por fila ainda não estão disponíveis.
+- Linhas inválidas e duplicadas são reportadas. Registros existentes não são atualizados nem fundidos automaticamente; jornadas, tarefas e notificações não são iniciadas em massa.
+- A Fase 5 permanece em andamento: escolhas de resolução de duplicidades, onboarding, exportação, auditoria e regras comerciais configuráveis ainda estão pendentes.
 
 ## Tecnologias
 

@@ -1,7 +1,9 @@
 <?php
 
 use App\Domain\Imports\CompanyImportService;
+use App\Domain\Imports\ContactImportService;
 use App\Domain\Tenancy\TenantContext;
+use App\Models\Company;
 use App\Models\DataImport;
 use App\Models\Organization;
 use App\Models\Team;
@@ -45,7 +47,6 @@ it('serializes a concurrent team deactivation with PostgreSQL import confirmatio
     $startedMarker = tempnam(sys_get_temp_dir(), 'import-team-lock-');
     expect($startedMarker)->not->toBeFalse();
     @unlink($startedMarker);
-
     $worker = null;
 
     try {
@@ -106,7 +107,125 @@ PHP;
         @unlink($startedMarker);
         @unlink($startedMarker.'.started');
         @unlink($startedMarker.'.done');
+        DB::table('organizations')->where('id', $organization->id)->delete();
+        DB::table('users')->where('id', $manager->id)->delete();
+        DB::connection()->beginTransaction();
+    }
+});
 
+it('serializes contact import with manager membership revocation from a referenced company team', function () {
+    if (DB::connection()->getDriverName() !== 'pgsql') {
+        $this->markTestSkipped('Cross-team authorization locking is verified against PostgreSQL.');
+    }
+
+    $organization = Organization::factory()->create();
+    $manager = User::factory()->create();
+    $organization->users()->attach($manager, ['role' => 'manager']);
+    app(TenantContext::class)->set($organization);
+    $destinationTeam = Team::query()->create([
+        'name' => 'Equipe destino do lote',
+        'status' => 'active',
+        'created_by' => $manager->id,
+    ]);
+    $companyTeam = Team::query()->create([
+        'name' => 'Equipe da empresa vinculada',
+        'status' => 'active',
+        'created_by' => $manager->id,
+    ]);
+    assignTeamMember($organization, $destinationTeam, $manager, 'manager');
+    assignTeamMember($organization, $companyTeam, $manager, 'manager');
+    $company = Company::factory()->create([
+        'organization_id' => $organization->id,
+        'name' => 'Empresa da segunda equipe',
+        'team_id' => $companyTeam->id,
+    ]);
+    $batch = DataImport::factory()->create([
+        'organization_id' => $organization->id,
+        'created_by' => $manager->id,
+        'team_id' => $destinationTeam->id,
+        'record_type' => 'contacts',
+        'status' => 'validated',
+        'mapping' => ['name' => 0, 'email' => 1, 'phone' => 2, 'company_name' => 3, 'company_roles' => 4],
+    ]);
+    DB::connection()->commit();
+
+    $startedMarker = tempnam(sys_get_temp_dir(), 'contact-team-lock-');
+    expect($startedMarker)->not->toBeFalse();
+    @unlink($startedMarker);
+    $worker = null;
+
+    try {
+        DB::beginTransaction();
+        Organization::query()->lockForUpdate()->findOrFail($organization->id);
+        $analysis = app(ContactImportService::class)->analyze(
+            $batch,
+            $manager,
+            [['Contato de teste', 'contato-equipe@example.test', '+5511999991111', $company->name, 'buyer']],
+            1,
+            true,
+        );
+        expect($analysis['validRows'])->toHaveCount(1);
+        $result = app(ContactImportService::class)->import($batch, $manager, $analysis['validRows']);
+        expect($result['createdRows'])->toBe(1);
+
+        $script = <<<'PHP'
+require 'vendor/autoload.php';
+$app = require 'bootstrap/app.php';
+$app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$organization = \App\Models\Organization::query()->findOrFail((int) $argv[1]);
+app(\App\Domain\Tenancy\TenantContext::class)->set($organization);
+$marker = $argv[2];
+file_put_contents($marker.'.started', 'started');
+\Illuminate\Support\Facades\DB::transaction(function () use ($argv): void {
+    \App\Models\Team::query()->where('organization_id', (int) $argv[1])->lockForUpdate()->findOrFail((int) $argv[3]);
+    \Illuminate\Support\Facades\DB::table('team_memberships')
+        ->where('organization_id', (int) $argv[1])
+        ->where('team_id', (int) $argv[3])
+        ->where('user_id', (int) $argv[4])
+        ->update(['is_active' => false, 'updated_at' => now()]);
+});
+file_put_contents($marker.'.done', 'done');
+PHP;
+        $worker = new Process([
+            PHP_BINARY,
+            '-r',
+            $script,
+            (string) $organization->id,
+            $startedMarker,
+            (string) $companyTeam->id,
+            (string) $manager->id,
+        ], base_path(), timeout: 30);
+        $worker->start();
+
+        $deadline = microtime(true) + 10;
+        while (microtime(true) < $deadline && ! file_exists($startedMarker.'.started')) {
+            usleep(25_000);
+        }
+
+        expect(file_exists($startedMarker.'.started'))->toBeTrue('The competing team membership update did not start.');
+        usleep(300_000);
+        expect($worker->isRunning())->toBeTrue('Membership revocation must wait until the contact import commits.');
+        expect(file_exists($startedMarker.'.done'))->toBeFalse();
+
+        DB::connection()->commit();
+        $worker->wait();
+
+        expect($worker->getExitCode())->toBe(0, $worker->getErrorOutput())
+            ->and(file_exists($startedMarker.'.done'))->toBeTrue()
+            ->and(DB::table('company_contacts')->where('company_id', $company->id)->count())->toBe(1)
+            ->and(DB::table('team_memberships')->where('team_id', $companyTeam->id)->where('user_id', $manager->id)->value('is_active'))->toBeFalse();
+    } finally {
+        if (DB::transactionLevel() > 0) {
+            DB::rollBack();
+        }
+
+        if ($worker?->isRunning()) {
+            $worker->stop();
+        }
+
+        @unlink($startedMarker);
+        @unlink($startedMarker.'.started');
+        @unlink($startedMarker.'.done');
         DB::table('organizations')->where('id', $organization->id)->delete();
         DB::table('users')->where('id', $manager->id)->delete();
         DB::connection()->beginTransaction();

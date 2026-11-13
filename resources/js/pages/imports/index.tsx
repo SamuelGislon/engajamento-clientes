@@ -31,7 +31,10 @@ type ImportRecord = {
 type PageLink = { url: string | null; label: string; active: boolean };
 type TeamOption = { id: number; name: string };
 
-const recordTypes = [{ value: 'companies', label: 'Empresas' }];
+const recordTypes = [
+    { value: 'companies', label: 'Empresas' },
+    { value: 'contacts', label: 'Contatos e vínculos com empresas' },
+];
 
 const statusLabels: Record<string, string> = {
     uploaded: 'Arquivo recebido',
@@ -95,9 +98,9 @@ export default function ImportsIndex({
                         Importar dados
                     </h1>
                     <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-                        Envie empresas em CSV ou XLSX, revise a prévia e
-                        confirme a gravação depois de mapear e validar as
-                        linhas.
+                        Envie empresas ou contatos em CSV ou XLSX, revise a
+                        prévia e confirme a gravação depois de mapear e validar
+                        as linhas.
                     </p>
                 </header>
 
@@ -206,9 +209,11 @@ export default function ImportsIndex({
                             <div className="flex items-start gap-2 rounded-xl bg-muted/40 p-3 text-sm text-muted-foreground">
                                 <ShieldCheck className="mt-0.5 size-4 shrink-0 text-primary" />
                                 <p>
-                                    Esta etapa importa somente empresas e não
-                                    inicia jornadas, tarefas ou notificações. A
-                                    equipe escolhida é validada no servidor.
+                                    Os contatos podem ser associados a empresas
+                                    já cadastradas na organização. Esta etapa
+                                    não inicia jornadas, tarefas ou
+                                    notificações; a equipe escolhida é validada
+                                    no servidor.
                                 </p>
                             </div>
 

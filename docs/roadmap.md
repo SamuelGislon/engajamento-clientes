@@ -42,7 +42,8 @@
 
 - [x] Base tenant-first de lotes privados para CSV/XLSX, prévia, mapeamento de empresas, validação parcial e retenção de 24 horas.
 - [x] Importação confirmada de empresas válidas, com detecção conservadora de duplicidades, resultado persistido e proteção contra repetição.
-- [ ] Importação de contatos, vínculos e vendas; escolhas de deduplicação; processamento assíncrono e controle configurável de jornadas.
+- [x] Importação de contatos e vínculos com empresas existentes acessíveis; deduplicação de linhas da mesma pessoa e preservação dos papéis específicos por vínculo.
+- [ ] Importação histórica de vendas, escolhas explícitas de deduplicação e resolução, processamento assíncrono retomável e controle configurável de jornadas.
 - [ ] Onboarding retomável e templates de adoção.
 - [ ] Configuração explicável de pontuação e inatividade.
 - [ ] Exportações CSV/XLSX autorizadas e downloads temporários privados.
@@ -52,4 +53,4 @@
 
 ## Pendências técnicas
 
-- A Fase 5 está em andamento e o corte de importação atual é somente de empresas, síncrono e sem iniciar jornadas. Consulte os itens pendentes antes de tratar a fase como concluída.
+- A Fase 5 está em andamento. Empresas e contatos são importados sincronamente em lotes de até 5.000 linhas, sem iniciar jornadas. Importação de vendas, escolhas explícitas de resolução, fila e os demais módulos listados acima permanecem pendentes; consulte os itens pendentes antes de tratar a fase como concluída.

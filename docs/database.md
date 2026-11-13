@@ -26,11 +26,11 @@
 - `companies.team_id`: equipe principal explícita da carteira; o responsável continua em `owner_user_id`.
 - `sales.team_id_at_sale`: snapshot da equipe no momento do registro, sem alterar `seller_id` histórico.
 - `notifications`: notificações Laravel por usuário; o campo `data` é JSON e inclui `organization_id` para filtrar cada workspace sem expor avisos de outros tenants.
-- `data_imports` (Fase 5 parcial): lote tenant-first, autor, equipe opcional, tipo/status, nome original sanitizado, disco/caminho privado, mapeamento de índices, no máximo 100 mensagens genéricas de validação, contagens por resultado e expiração em 24 horas. Chaves compostas obrigam autor e equipe a pertencerem à organização; o caminho privado é apagado na retenção.
+- `data_imports` (Fase 5 parcial): lote tenant-first, autor, equipe opcional, tipo (`companies` ou `contacts`), estado, nome original sanitizado, disco/caminho privado, mapeamento de índices, até 100 mensagens genéricas de validação, contagens por resultado e expiração em 24 horas. Chaves compostas obrigam autor e equipe a pertencerem à organização; o caminho privado é apagado na retenção.
 
 ## Integridade e isolamento
 
-Todas as tabelas comerciais possuem `organization_id`. Os relacionamentos são filtrados pelo tenant ativo e validados também na entrada. Índices combinados começam por `organization_id` para consultas da carteira. `company_contacts` possui unicidade por organização, empresa e contato. `activities` referencia empresa e contato e impede associações cruzadas na camada de aplicação.
+Todas as tabelas comerciais possuem `organization_id`. Os relacionamentos são filtrados pelo tenant ativo e validados também na entrada. Índices combinados começam por `organization_id` para consultas da carteira. `company_contacts` possui unicidade por organização, empresa e contato; na importação, cada vínculo guarda seus próprios papéis, indicador de contato principal e observação. `activities` referencia empresa e contato e impede associações cruzadas na camada de aplicação.
 
 `organization_user` usa unicidade em `(organization_id, user_id)`. O papel está nessa associação para evitar que alternar workspace altere privilégios de outra organização. Tarefas e jornadas usam chaves estrangeiras compostas com `organization_id`, índices tenant-first e vínculos que impedem empresa, contato, usuário, modelo ou etapa de outro tenant. Uma inscrição ativa ou pausada é única por empresa e modelo. Uma execução possui no máximo uma tarefa gerada. Um template ativo padrão é único por organização.
 

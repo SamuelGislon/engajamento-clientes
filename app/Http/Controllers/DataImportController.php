@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Domain\Commercial\CustomerScoreService;
 use App\Domain\Imports\CompanyImportFields;
 use App\Domain\Imports\CompanyImportService;
+use App\Domain\Imports\ContactImportFields;
+use App\Domain\Imports\ContactImportService;
 use App\Domain\Imports\ImportFileException;
 use App\Domain\Imports\SpreadsheetPreviewReader;
 use App\Domain\Teams\CommercialAccessScope;
@@ -157,7 +159,7 @@ class DataImportController extends Controller
             ],
             'preview' => $preview,
             'fileError' => $fileError,
-            'fields' => app(CompanyImportFields::class)->options(),
+            'fields' => $this->fieldsFor($record),
         ]);
     }
 
@@ -165,7 +167,6 @@ class DataImportController extends Controller
         SaveDataImportMappingRequest $request,
         int $dataImport,
         SpreadsheetPreviewReader $previewReader,
-        CompanyImportFields $companyImportFields,
     ): RedirectResponse {
         $record = DataImport::query()->findOrFail($dataImport);
         Gate::authorize('update', $record);
@@ -178,7 +179,7 @@ class DataImportController extends Controller
             $request->validated('mapping'),
             fn (mixed $columnIndex): bool => $columnIndex !== null && $columnIndex !== '',
         );
-        $fieldOptions = $companyImportFields->options();
+        $fieldOptions = $this->fieldsFor($record);
         $allowedColumns = array_keys($preview['headers']);
         $errors = [];
 
@@ -228,6 +229,7 @@ class DataImportController extends Controller
         int $dataImport,
         SpreadsheetPreviewReader $previewReader,
         CompanyImportService $companyImports,
+        ContactImportService $contactImports,
     ): RedirectResponse {
         $record = DataImport::query()->findOrFail($dataImport);
         Gate::authorize('update', $record);
@@ -246,11 +248,19 @@ class DataImportController extends Controller
             throw ValidationException::withMessages(['file' => $exception->getMessage()]);
         }
 
-        $analysis = $companyImports->analyze(
+        $importService = match ($record->record_type) {
+            'companies' => $companyImports,
+            'contacts' => $contactImports,
+            default => abort(422),
+        };
+
+        $analysis = $importService->analyze(
             $record,
             $request->user(),
             $preview['rows'],
             $preview['totalRows'],
+            false,
+            $preview['malformedRows'],
         );
 
         $record->update([
@@ -270,12 +280,13 @@ class DataImportController extends Controller
         int $dataImport,
         SpreadsheetPreviewReader $previewReader,
         CompanyImportService $companyImports,
+        ContactImportService $contactImports,
         CustomerScoreService $scores,
     ): RedirectResponse {
         $record = DataImport::query()->findOrFail($dataImport);
         Gate::authorize('update', $record);
 
-        DB::transaction(function () use ($request, $record, $previewReader, $companyImports, $scores): void {
+        DB::transaction(function () use ($request, $record, $previewReader, $companyImports, $contactImports, $scores): void {
             $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
             Gate::authorize('update', $batch);
 
@@ -300,45 +311,65 @@ class DataImportController extends Controller
                 throw ValidationException::withMessages(['file' => $exception->getMessage()]);
             }
 
-            $analysis = $companyImports->analyze(
-                $batch,
-                $request->user(),
-                $preview['rows'],
-                $preview['totalRows'],
-                true,
-            );
             $createdRows = 0;
             $raceDuplicates = 0;
+            $raceInvalidRows = 0;
 
-            foreach ($analysis['validRows'] as $row) {
-                $attributes = $row['attributes'];
-                $taxId = $attributes['tax_id'] ?? null;
-                unset($attributes['tax_id']);
+            if ($batch->record_type === 'contacts') {
+                $analysis = $contactImports->analyze(
+                    $batch,
+                    $request->user(),
+                    $preview['rows'],
+                    $preview['totalRows'],
+                    true,
+                    $preview['malformedRows'],
+                );
+                $importResult = $contactImports->import($batch, $request->user(), $analysis['validRows']);
+                $createdRows = $importResult['createdRows'];
+                $raceDuplicates = $importResult['duplicateRows'];
+                $raceInvalidRows = $importResult['invalidRows'];
+                $analysis['invalidRows'] += $raceInvalidRows;
+                $analysis['errors'] = array_merge($analysis['errors'], $importResult['errors']);
+            } else {
+                $analysis = $companyImports->analyze(
+                    $batch,
+                    $request->user(),
+                    $preview['rows'],
+                    $preview['totalRows'],
+                    true,
+                    $preview['malformedRows'],
+                );
 
-                if ($taxId !== null) {
-                    $company = Company::query()->firstOrCreate(
-                        ['tax_id' => $taxId],
-                        ['tax_id' => $taxId, ...$attributes],
-                    );
+                foreach ($analysis['validRows'] as $row) {
+                    $attributes = $row['attributes'];
+                    $taxId = $attributes['tax_id'] ?? null;
+                    unset($attributes['tax_id']);
 
-                    if (! $company->wasRecentlyCreated) {
-                        $raceDuplicates++;
+                    if ($taxId !== null) {
+                        $company = Company::query()->firstOrCreate(
+                            ['tax_id' => $taxId],
+                            ['tax_id' => $taxId, ...$attributes],
+                        );
 
-                        continue;
+                        if (! $company->wasRecentlyCreated) {
+                            $raceDuplicates++;
+
+                            continue;
+                        }
+                    } else {
+                        $company = Company::query()->create($attributes);
                     }
-                } else {
-                    $company = Company::query()->create($attributes);
-                }
 
-                $scores->recalculateForCompany($company, 'Importação de planilha');
-                $createdRows++;
+                    $scores->recalculateForCompany($company, 'Importação de planilha');
+                    $createdRows++;
+                }
             }
 
             $duplicateRows = $analysis['duplicateRows'] + $raceDuplicates;
             $batch->update([
                 'status' => 'completed',
                 'total_rows' => $analysis['totalRows'],
-                'valid_rows' => count($analysis['validRows']) - $raceDuplicates,
+                'valid_rows' => count($analysis['validRows']) - $raceDuplicates - $raceInvalidRows,
                 'invalid_rows' => $analysis['invalidRows'],
                 'duplicate_rows' => $duplicateRows,
                 'created_rows' => $createdRows,
@@ -352,7 +383,7 @@ class DataImportController extends Controller
         return redirect()->route('imports.show', $record->id)->with('success', 'Importação concluída. Confira os totais e as linhas ignoradas.');
     }
 
-    /** @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int} */
+    /** @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int, malformedRows: list<int>} */
     private function previewRecord(DataImport $record, SpreadsheetPreviewReader $previewReader, int $sampleLimit = 10): array
     {
         if ($record->expires_at->isPast()) {
@@ -376,5 +407,15 @@ class DataImportController extends Controller
             $format,
             $sampleLimit,
         );
+    }
+
+    /** @return array<string, array{label: string, required: bool}> */
+    private function fieldsFor(DataImport $record): array
+    {
+        return match ($record->record_type) {
+            'companies' => app(CompanyImportFields::class)->options(),
+            'contacts' => app(ContactImportFields::class)->options(),
+            default => [],
+        };
     }
 }

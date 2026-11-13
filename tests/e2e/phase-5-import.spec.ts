@@ -43,6 +43,56 @@ test('owner imports a CSV company after mapping and reviewing validation', async
     ).toBeVisible();
 });
 
+test('owner imports one contact linked to multiple existing companies', async ({
+    page,
+}) => {
+    const contactName = 'Contato Multiempresa E2E';
+    const contactEmail = 'multiempresa@example.test';
+
+    await signIn(page, 'owner@example.test');
+    await page.goto('/imports');
+    await page
+        .getByLabel('O que você está importando?')
+        .selectOption('contacts');
+    await page.getByLabel('Arquivo CSV ou Excel').setInputFiles({
+        name: 'contacts.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from(
+            [
+                'Name,Email,Job title,Company name,Company roles,Is primary',
+                `${contactName},${contactEmail},Diretora,Escritório Horizonte,decision_maker,sim`,
+                `${contactName},${contactEmail},Diretora,Escritório Brisa,buyer,não`,
+            ].join('\n'),
+        ),
+    });
+    await page.getByRole('button', { name: 'Enviar para prévia' }).click();
+
+    await page.getByRole('link', { name: 'contacts.csv' }).click();
+    await expect(page.getByText(contactName).first()).toBeVisible();
+    await page.getByLabel('Nome completo').selectOption('0');
+    await page.getByLabel('E-mail').selectOption('1');
+    await page.getByLabel('Cargo ou função').selectOption('2');
+    await page.getByLabel('Nome da empresa').selectOption('3');
+    await page.getByLabel('Papéis na empresa (; separados)').selectOption('4');
+    await page.getByLabel('Contato principal (sim/não)').selectOption('5');
+    await page.getByRole('button', { name: 'Salvar mapeamento' }).click();
+
+    await page.getByRole('button', { name: 'Validar todas as linhas' }).click();
+    await expect(
+        page.getByRole('heading', { name: 'Validar e confirmar' }),
+    ).toBeVisible();
+    await expect(page.getByText('2', { exact: true }).first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Confirmar importação' }).click();
+    await expect(
+        page.getByRole('heading', { name: 'Resultado da importação' }),
+    ).toBeVisible();
+    await expect(page.getByText(contactName).first()).toBeVisible();
+
+    await page.goto('/contacts');
+    await expect(page.getByText(contactName, { exact: true })).toBeVisible();
+});
+
 test('owner sees why confirmation stops when its destination team becomes inactive', async ({
     page,
 }) => {

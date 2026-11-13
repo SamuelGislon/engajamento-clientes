@@ -16,7 +16,7 @@ class SpreadsheetPreviewReader
     public const MAX_COLUMNS = 100;
 
     /**
-     * @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int}
+     * @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int, malformedRows: list<int>}
      */
     public function preview(string $path, string $format, int $sampleLimit = 10): array
     {
@@ -35,6 +35,7 @@ class SpreadsheetPreviewReader
             foreach ($reader->getSheetIterator() as $sheet) {
                 $headers = null;
                 $rows = [];
+                $malformedRows = [];
                 $totalRows = 0;
 
                 foreach ($sheet->getRowIterator() as $row) {
@@ -58,7 +59,11 @@ class SpreadsheetPreviewReader
                     }
 
                     if (count($values) > count($headers)) {
-                        throw new ImportFileException('Uma linha contém mais colunas do que o cabeçalho. Corrija a planilha e envie novamente.');
+                        $extraValues = array_slice($values, count($headers));
+                        if (count(array_filter($extraValues, static fn (string $value): bool => trim($value) !== '')) > 0) {
+                            $malformedRows[] = $totalRows + 2;
+                        }
+                        $values = array_slice($values, 0, count($headers));
                     }
 
                     $values = array_pad($values, count($headers), '');
@@ -82,6 +87,7 @@ class SpreadsheetPreviewReader
                     'headers' => $headers,
                     'rows' => $rows,
                     'totalRows' => $totalRows,
+                    'malformedRows' => $malformedRows,
                 ];
             }
 
