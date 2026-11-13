@@ -34,6 +34,7 @@ type TeamOption = { id: number; name: string };
 const recordTypes = [
     { value: 'companies', label: 'Empresas' },
     { value: 'contacts', label: 'Contatos e vínculos com empresas' },
+    { value: 'sales', label: 'Vendas históricas' },
 ];
 
 const statusLabels: Record<string, string> = {
@@ -209,11 +210,11 @@ export default function ImportsIndex({
                             <div className="flex items-start gap-2 rounded-xl bg-muted/40 p-3 text-sm text-muted-foreground">
                                 <ShieldCheck className="mt-0.5 size-4 shrink-0 text-primary" />
                                 <p>
-                                    Os contatos podem ser associados a empresas
-                                    já cadastradas na organização. Esta etapa
-                                    não inicia jornadas, tarefas ou
-                                    notificações; a equipe escolhida é validada
-                                    no servidor.
+                                    Empresas, contatos, vínculos e vendas são
+                                    validados no servidor conforme o tenant e a
+                                    carteira. Na confirmação, cada modalidade
+                                    aplica suas regras comerciais; opções de
+                                    jornada ainda estão em desenvolvimento.
                                 </p>
                             </div>
 

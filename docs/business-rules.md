@@ -86,7 +86,7 @@ O seeder apresenta os cenários fictícios de cliente estratégico, cliente inat
 - Faturamento, quantidade, ticket e compradores usam somente vendas confirmadas. Vendas novas guardam equipe no momento da venda; registros legados sem snapshot usam a equipe atual da empresa.
 - Desempenho por vendedor usa a carteira atual e seller histórico da venda. O relatório informa explicitamente a política usada para vendas antigas.
 
-## Implementadas parcialmente na Fase 5 — Importação de empresas e contatos
+## Implementadas parcialmente na Fase 5 — Importação de empresas, contatos e vendas
 
 - O lote sempre pertence à organização ativa. O arquivo CSV/XLSX é privado, limitado a 10 MB, 100 colunas e 5.000 linhas, e expira após 24 horas.
 - O usuário precisa mapear o campo obrigatório `name`, validar todas as linhas e confirmar explicitamente. A operação é transacional e a confirmação repetida de um lote concluído não cria empresas adicionais.
@@ -97,10 +97,13 @@ O seeder apresenta os cenários fictícios de cliente estratégico, cliente inat
 - Linhas com o mesmo e-mail ou nome e telefone normalizados podem representar a mesma pessoa. Campos pessoais vazios podem ser complementados por outra linha; valores preenchidos divergentes invalidam o grupo para revisão. Um contato novo pode ser associado a várias empresas, com papéis, sinalizador de contato principal e observações próprios de cada vínculo.
 - Um contato já existente e visível ao ator é relatado como duplicidade; não é alterado nem associado automaticamente. Se a identidade existe em empresa fora do escopo do ator, a linha é rejeitada com mensagem genérica para não revelar dados de outra carteira.
 - Papéis do vínculo usam os códigos da aplicação (`owner`, `partner`, `budget_manager`, `buyer`, `decision_maker`, `influencer`, `specifier`, `finance`, `operations`, `other`); papéis ausentes assumem `other`. E-mail é normalizado para minúsculas; telefone é preservado como informado e só é normalizado na comparação de identidade.
-- Esta etapa ainda não importa vendas, não oferece as escolhas de criar/atualizar/ignorar/resolver manualmente, não inicia jornadas nem gera tarefas/notificações em massa. A confirmação é síncrona e limitada a 5.000 linhas.
+- Vendas históricas referenciam uma empresa visível ao ator no tenant ativo e um vendedor ativo da mesma organização. Vendedores só podem indicar a si mesmos; gestores precisam escolher vendedor da equipe da empresa que administram; owner/admin seguem a exigência de membership quando a empresa tem equipe.
+- O valor importado aceita até duas casas decimais e deve caber em `decimal(14,2)`. `BRL` é a moeda inicial. Datas aceitas são `AAAA-MM-DD`, `AAAA-MM-DD HH:MM[:SS]`, ISO 8601 com frações de segundo, ou `DD/MM/AAAA` quando o dia é maior que 12; datas com dia e mês ambos até 12 são rejeitadas como ambíguas. Células de data XLSX sem fuso usam o fuso da organização; timestamps com offset preservam o instante. Todas as datas são armazenadas em UTC.
+- Status importados são `confirmed` e `cancelled`. Vendas confirmadas atualizam estado de cliente, inatividade e pontuação; vendas canceladas são preservadas com autor e instante do cancelamento, não entram nos agregados e atualizam o estado de inatividade. Um identificador externo repetido é ignorado quando visível ao ator; conflito com registro fora do escopo é rejeitado com mensagem genérica. Linhas sem identificador externo são mantidas separadamente, mesmo que seus atributos coincidam: atributos iguais não provam que compras sejam a mesma transação. Para impedir reimportação entre lotes, use um identificador externo estável. A confirmação repetida do mesmo lote continua idempotente.
+- A confirmação repetida do mesmo lote é idempotente. Ainda não há escolhas de criar/atualizar/ignorar/resolver manualmente, execução assíncrona retomável nem seleção de jornadas; o processamento é síncrono e limitado a 5.000 linhas. Sem identificador externo estável, a aplicação não consegue reconhecer uma venda reapresentada em outro lote; a resolução explícita de possíveis duplicidades permanece pendente.
 
 ### Planejadas
 
-- Importação de vendas; escolhas de tratamento de duplicidade (`criar`, `atualizar`, `ignorar`, resolução manual); processamento assíncrono retomável por lotes e opções seguras de jornadas.
+- Escolhas de tratamento de duplicidade (`criar`, `atualizar`, `ignorar`, resolução manual); processamento assíncrono retomável por lotes e opções seguras de jornadas.
 - Onboarding, ajustes de regras de pontuação/inatividade, exportação autorizada e auditoria consultável.
 - Integrações com ERP, fora do MVP atual.

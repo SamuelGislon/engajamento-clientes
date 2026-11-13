@@ -93,6 +93,53 @@ test('owner imports one contact linked to multiple existing companies', async ({
     await expect(page.getByText(contactName, { exact: true })).toBeVisible();
 });
 
+test('owner imports a historical sale with an authorized seller', async ({
+    page,
+}) => {
+    const description = 'Venda histórica importada E2E';
+
+    await signIn(page, 'owner@example.test');
+    await page.goto('/imports');
+    await page.getByLabel('O que você está importando?').selectOption('sales');
+    await page.getByLabel('Arquivo CSV ou Excel').setInputFiles({
+        name: 'sales.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from(
+            [
+                'External ID,Company name,Seller email,Description,Amount,Currency,Sold at,Status',
+                `e2e-historical-sale,Escritório Horizonte,ana@example.test,${description},1250.75,BRL,2026-01-20,confirmed`,
+            ].join('\n'),
+        ),
+    });
+    await page.getByRole('button', { name: 'Enviar para prévia' }).click();
+
+    await page.getByRole('link', { name: 'sales.csv' }).click();
+    await page.getByLabel('Identificador externo').selectOption('0');
+    await page.getByLabel('Nome da empresa').selectOption('1');
+    await page.getByLabel('E-mail do vendedor').selectOption('2');
+    await page.getByLabel('Descrição da venda').selectOption('3');
+    await page.getByLabel('Valor decimal').selectOption('4');
+    await page.getByLabel('Moeda').selectOption('5');
+    await page.getByLabel('Data e hora da venda').selectOption('6');
+    await page.getByLabel('Situação (confirmed/cancelled)').selectOption('7');
+    await page.getByRole('button', { name: 'Salvar mapeamento' }).click();
+
+    await page.getByRole('button', { name: 'Validar todas as linhas' }).click();
+    await expect(
+        page.getByRole('heading', { name: 'Validar e confirmar' }),
+    ).toBeVisible();
+    await expect(page.getByText('1', { exact: true }).first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Confirmar importação' }).click();
+    await expect(
+        page.getByRole('heading', { name: 'Resultado da importação' }),
+    ).toBeVisible();
+    await expect(page.getByText(description)).toBeVisible();
+
+    await page.goto('/sales');
+    await expect(page.getByText(description, { exact: true })).toBeVisible();
+});
+
 test('owner sees why confirmation stops when its destination team becomes inactive', async ({
     page,
 }) => {

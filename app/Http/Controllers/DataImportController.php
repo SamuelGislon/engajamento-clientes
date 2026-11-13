@@ -2,13 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Domain\Commercial\CommercialInactivityService;
 use App\Domain\Commercial\CustomerScoreService;
 use App\Domain\Imports\CompanyImportFields;
 use App\Domain\Imports\CompanyImportService;
 use App\Domain\Imports\ContactImportFields;
 use App\Domain\Imports\ContactImportService;
 use App\Domain\Imports\ImportFileException;
+use App\Domain\Imports\SaleImportFields;
+use App\Domain\Imports\SaleImportService;
 use App\Domain\Imports\SpreadsheetPreviewReader;
+use App\Domain\Journeys\JourneyService;
 use App\Domain\Teams\CommercialAccessScope;
 use App\Domain\Tenancy\TenantContext;
 use App\Http\Requests\SaveDataImportMappingRequest;
@@ -230,6 +234,7 @@ class DataImportController extends Controller
         SpreadsheetPreviewReader $previewReader,
         CompanyImportService $companyImports,
         ContactImportService $contactImports,
+        SaleImportService $saleImports,
     ): RedirectResponse {
         $record = DataImport::query()->findOrFail($dataImport);
         Gate::authorize('update', $record);
@@ -251,6 +256,7 @@ class DataImportController extends Controller
         $importService = match ($record->record_type) {
             'companies' => $companyImports,
             'contacts' => $contactImports,
+            'sales' => $saleImports,
             default => abort(422),
         };
 
@@ -281,12 +287,15 @@ class DataImportController extends Controller
         SpreadsheetPreviewReader $previewReader,
         CompanyImportService $companyImports,
         ContactImportService $contactImports,
+        SaleImportService $saleImports,
         CustomerScoreService $scores,
+        CommercialInactivityService $inactivity,
+        JourneyService $journeys,
     ): RedirectResponse {
         $record = DataImport::query()->findOrFail($dataImport);
         Gate::authorize('update', $record);
 
-        DB::transaction(function () use ($request, $record, $previewReader, $companyImports, $contactImports, $scores): void {
+        DB::transaction(function () use ($request, $record, $previewReader, $companyImports, $contactImports, $saleImports, $scores, $inactivity, $journeys): void {
             $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
             Gate::authorize('update', $batch);
 
@@ -330,6 +339,23 @@ class DataImportController extends Controller
                 $raceInvalidRows = $importResult['invalidRows'];
                 $analysis['invalidRows'] += $raceInvalidRows;
                 $analysis['errors'] = array_merge($analysis['errors'], $importResult['errors']);
+            } elseif ($batch->record_type === 'sales') {
+                $analysis = $saleImports->analyze(
+                    $batch,
+                    $request->user(),
+                    $preview['rows'],
+                    $preview['totalRows'],
+                    true,
+                    $preview['malformedRows'],
+                );
+                $importResult = $saleImports->import($batch, $request->user(), $analysis['validRows'], $scores, $inactivity, $journeys);
+                $createdRows = $importResult['createdRows'];
+                $raceDuplicates = $importResult['duplicateRows'];
+                $raceInvalidRows = $importResult['invalidRows'];
+                $analysis['invalidRows'] += $raceInvalidRows;
+                $analysis['errors'] = array_merge($analysis['errors'], $importResult['errors']);
+            } elseif ($batch->record_type !== 'companies') {
+                abort(422);
             } else {
                 $analysis = $companyImports->analyze(
                     $batch,
@@ -415,6 +441,7 @@ class DataImportController extends Controller
         return match ($record->record_type) {
             'companies' => app(CompanyImportFields::class)->options(),
             'contacts' => app(ContactImportFields::class)->options(),
+            'sales' => app(SaleImportFields::class)->options(),
             default => [],
         };
     }

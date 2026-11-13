@@ -4,6 +4,7 @@ namespace App\Http\Requests;
 
 use App\Domain\Imports\CompanyImportFields;
 use App\Domain\Imports\ContactImportFields;
+use App\Domain\Imports\SaleImportFields;
 use App\Models\DataImport;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
@@ -31,6 +32,7 @@ class SaveDataImportMappingRequest extends FormRequest
         $fields = match ($record?->record_type) {
             'companies' => app(CompanyImportFields::class)->options(),
             'contacts' => app(ContactImportFields::class)->options(),
+            'sales' => app(SaleImportFields::class)->options(),
             default => [],
         };
         $rules = ['mapping' => ['required', 'array']];

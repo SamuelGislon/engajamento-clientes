@@ -191,7 +191,7 @@ class SpreadsheetPreviewReader
         }
 
         if ($value instanceof DateTimeInterface) {
-            return $value->format(DATE_ATOM);
+            return $value->format('Y-m-d\\TH:i:s');
         }
 
         if ($value instanceof DateInterval) {

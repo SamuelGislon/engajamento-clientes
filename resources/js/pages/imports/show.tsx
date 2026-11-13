@@ -282,7 +282,9 @@ export default function ImportShow({
                                     a cada campo.{' '}
                                     {importRecord.record_type === 'contacts'
                                         ? 'Associe cada linha a uma empresa acessível pelo CNPJ ou nome exato. Linhas com o mesmo e-mail ou nome e telefone iguais podem criar um contato com vários vínculos, se os dados pessoais forem compatíveis.'
-                                        : 'O nome da empresa é obrigatório.'}
+                                        : importRecord.record_type === 'sales'
+                                          ? 'Associe a venda a uma empresa acessível e a um vendedor ativo autorizado. Se houver, mapeie um identificador externo estável para evitar reimportação entre lotes. Sem ele, linhas iguais são mantidas separadamente. O valor aceita ponto ou vírgula decimal e datas sem fuso são interpretadas no fuso da organização.'
+                                          : 'O nome da empresa é obrigatório.'}
                                 </p>
                             </div>
                             <div className="mt-5 grid gap-4 sm:grid-cols-2">
@@ -369,9 +371,11 @@ export default function ImportShow({
                         <h2 className="font-semibold">Validar e confirmar</h2>
                         <p className="mt-1 text-sm text-muted-foreground">
                             A validação lê todas as linhas, identifica erros e
-                            duplicidades determinísticas. Linhas duplicadas ou
-                            inválidas serão ignoradas; os registros existentes
-                            não serão alterados.
+                            duplicidades reconhecíveis pelas regras de cada
+                            tipo. Linhas duplicadas ou inválidas serão
+                            ignoradas; os registros existentes não serão
+                            alterados. Vendas sem identificador externo são
+                            tratadas como transações distintas.
                         </p>
                         <div className="mt-5 grid gap-3 sm:grid-cols-4">
                             <Summary

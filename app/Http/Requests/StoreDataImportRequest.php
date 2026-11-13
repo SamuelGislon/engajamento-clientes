@@ -29,7 +29,7 @@ class StoreDataImportRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'record_type' => ['required', 'string', Rule::in(['companies', 'contacts'])],
+            'record_type' => ['required', 'string', Rule::in(['companies', 'contacts', 'sales'])],
             'journey_mode' => ['required', 'string', Rule::in(['none'])],
             'journey_template_id' => ['prohibited'],
             'team_id' => [

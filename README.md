@@ -36,12 +36,12 @@ Plataforma SaaS B2B para organizar o relacionamento comercial, acompanhar empres
 
 As migrations e a suíte completa foram validadas em PostgreSQL. A Fase 4 também validou um worker Redis com retentativa de e-mail, Scheduler idempotente, aceite concorrente de convite, entrega no Mailpit e seis fluxos E2E no Chromium. Consulte [docs/roadmap.md](docs/roadmap.md) para o estado atualizado.
 
-### Fase 5 — Adoção (bloco parcial)
+### Fase 5 — Adoção (em andamento)
 
-- Importação privada de empresas e contatos por CSV/XLSX, com prévia, mapeamento, validação, confirmação transacional e relatório. Contatos podem ser associados a várias empresas acessíveis, com papéis no vínculo.
-- Uploads ficam no disco privado e são limpos após 24 horas pelo Scheduler. A importação permanece síncrona e limitada a 5.000 linhas; vendas e processamento por fila ainda não estão disponíveis.
-- Linhas inválidas e duplicadas são reportadas. Registros existentes não são atualizados nem fundidos automaticamente; jornadas, tarefas e notificações não são iniciadas em massa.
-- A Fase 5 permanece em andamento: escolhas de resolução de duplicidades, onboarding, exportação, auditoria e regras comerciais configuráveis ainda estão pendentes.
+- Importação privada de empresas, contatos/vínculos e vendas históricas por CSV/XLSX, com prévia, mapeamento, validação por linha, confirmação transacional e relatório.
+- A importação de vendas exige empresa acessível e vendedor ativo autorizado; valida datas no fuso da organização, valores compatíveis com `decimal(14,2)`, status e repetições. Confirmação recalcula os dados comerciais e preserva vendas canceladas no histórico.
+- Uploads ficam no disco privado e são limpos após 24 horas pelo Scheduler. A confirmação ainda é síncrona e limitada a 5.000 linhas.
+- A Fase 5 permanece em andamento: resolução explícita de duplicidades, processamento assíncrono, jornadas selecionáveis, onboarding, exportação, auditoria, configuração comercial e preparação para planos ainda estão pendentes.
 
 ## Tecnologias
 

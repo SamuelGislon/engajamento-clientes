@@ -26,7 +26,7 @@
 - `companies.team_id`: equipe principal explícita da carteira; o responsável continua em `owner_user_id`.
 - `sales.team_id_at_sale`: snapshot da equipe no momento do registro, sem alterar `seller_id` histórico.
 - `notifications`: notificações Laravel por usuário; o campo `data` é JSON e inclui `organization_id` para filtrar cada workspace sem expor avisos de outros tenants.
-- `data_imports` (Fase 5 parcial): lote tenant-first, autor, equipe opcional, tipo (`companies` ou `contacts`), estado, nome original sanitizado, disco/caminho privado, mapeamento de índices, até 100 mensagens genéricas de validação, contagens por resultado e expiração em 24 horas. Chaves compostas obrigam autor e equipe a pertencerem à organização; o caminho privado é apagado na retenção.
+- `data_imports` (Fase 5 parcial): lote tenant-first, autor, equipe opcional, tipo (`companies`, `contacts` ou `sales`), estado, nome original sanitizado, disco/caminho privado, mapeamento de índices, até 100 mensagens genéricas de validação, contagens por resultado e expiração em 24 horas. Chaves compostas obrigam autor e equipe a pertencerem à organização; o caminho privado é apagado na retenção.
 
 ## Integridade e isolamento
 

@@ -43,7 +43,8 @@
 - [x] Base tenant-first de lotes privados para CSV/XLSX, prévia, mapeamento de empresas, validação parcial e retenção de 24 horas.
 - [x] Importação confirmada de empresas válidas, com detecção conservadora de duplicidades, resultado persistido e proteção contra repetição.
 - [x] Importação de contatos e vínculos com empresas existentes acessíveis; deduplicação de linhas da mesma pessoa e preservação dos papéis específicos por vínculo.
-- [ ] Importação histórica de vendas, escolhas explícitas de deduplicação e resolução, processamento assíncrono retomável e controle configurável de jornadas.
+- [x] Importação histórica de vendas com empresa e vendedor autorizados, validação de valores/datas/status, detecção de repetição e recálculo comercial.
+- [ ] Escolhas explícitas de deduplicação e resolução de ambiguidades; processamento assíncrono retomável e controle configurável de jornadas.
 - [ ] Onboarding retomável e templates de adoção.
 - [ ] Configuração explicável de pontuação e inatividade.
 - [ ] Exportações CSV/XLSX autorizadas e downloads temporários privados.
@@ -53,4 +54,4 @@
 
 ## Pendências técnicas
 
-- A Fase 5 está em andamento. Empresas e contatos são importados sincronamente em lotes de até 5.000 linhas, sem iniciar jornadas. Importação de vendas, escolhas explícitas de resolução, fila e os demais módulos listados acima permanecem pendentes; consulte os itens pendentes antes de tratar a fase como concluída.
+- A Fase 5 está em andamento. Empresas, contatos e vendas são importados sincronamente em lotes de até 5.000 linhas; vendas confirmadas atualizam os indicadores e automações comerciais configurados. Identificadores externos estáveis evitam reimportação entre lotes; sem eles, as linhas são importadas individualmente para não descartar compras legítimas com atributos coincidentes. Confirmação repetida do mesmo lote é idempotente. Escolhas explícitas de resolução, fila, jornadas selecionáveis e os demais módulos listados acima permanecem pendentes; consulte os itens pendentes antes de tratar a fase como concluída.
