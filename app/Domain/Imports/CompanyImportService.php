@@ -99,20 +99,32 @@ class CompanyImportService
             ];
         }
 
-        $existingKeys = $this->existingIdentityKeys($batch, $candidates);
+        $existingKeys = $this->existingIdentityKeys($batch, $actor, $candidates);
         $seenKeys = [];
         $validRows = [];
         $duplicateRows = 0;
 
         foreach ($candidates as $candidate) {
             $isDuplicate = false;
+            $isOutsidePortfolio = false;
 
             foreach ($candidate['keys'] as $key) {
-                if (isset($existingKeys[$key]) || isset($seenKeys[$key])) {
+                if (isset($existingKeys['hidden'][$key])) {
+                    $isOutsidePortfolio = true;
+                } elseif (isset($existingKeys['visible'][$key]) || isset($seenKeys[$key])) {
                     $isDuplicate = true;
                 }
+            }
 
+            foreach ($candidate['keys'] as $key) {
                 $seenKeys[$key] = true;
+            }
+
+            if ($isOutsidePortfolio) {
+                $invalidRows++;
+                $this->appendError($errors, $candidate['line'], 'invalid', 'A linha não pode ser importada no escopo de acesso atual.');
+
+                continue;
             }
 
             if ($isDuplicate) {
@@ -212,9 +224,9 @@ class CompanyImportService
 
     /**
      * @param  list<array{line: int, attributes: array<string, mixed>, keys: list<string>}>  $candidates
-     * @return array<string, true>
+     * @return array{visible: array<string, true>, hidden: array<string, true>}
      */
-    private function existingIdentityKeys(DataImport $batch, array $candidates): array
+    private function existingIdentityKeys(DataImport $batch, User $actor, array $candidates): array
     {
         $taxIds = [];
         $names = [];
@@ -247,16 +259,26 @@ class CompanyImportService
             })
             ->get(['tax_id', 'name', 'city', 'state']);
 
-        $keys = [];
+        $keys = ['visible' => [], 'hidden' => []];
+
+        $visibleCompanyIds = Company::query()
+            ->where('organization_id', $batch->organization_id)
+            ->visibleTo($actor)
+            ->whereKey($companies->modelKeys())
+            ->pluck('id')
+            ->all();
+        $visibleCompanyIds = array_fill_keys($visibleCompanyIds, true);
 
         foreach ($companies as $company) {
+            $visibility = isset($visibleCompanyIds[$company->id]) ? 'visible' : 'hidden';
+
             foreach ($this->identityKeys([
                 'tax_id' => $company->tax_id ? preg_replace('/\D+/', '', $company->tax_id) : null,
                 'name' => $company->name,
                 'city' => $company->city,
                 'state' => $company->state,
             ]) as $key) {
-                $keys[$key] = true;
+                $keys[$visibility][$key] = true;
             }
         }
 

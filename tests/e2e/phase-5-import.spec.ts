@@ -43,6 +43,47 @@ test('owner imports a CSV company after mapping and reviewing validation', async
     ).toBeVisible();
 });
 
+test('owner can choose the default journey for imported eligible prospects', async ({
+    page,
+}) => {
+    const companyName = 'Prospecto com Jornada E2E';
+
+    await signIn(page, 'owner@example.test');
+    await page.goto('/imports');
+    await page
+        .getByLabel('Jornadas para os prospectos importados')
+        .selectOption('default');
+    await page.getByLabel('Arquivo CSV ou Excel').setInputFiles({
+        name: 'companies-journey.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from(`Name\n${companyName}\n`),
+    });
+    await page.getByRole('button', { name: 'Enviar para prévia' }).click();
+
+    await page.getByRole('link', { name: 'companies-journey.csv' }).click();
+    await expect(page.getByText('Jornadas: jornada padrão')).toBeVisible();
+    await page.getByLabel('Nome da empresa').selectOption('0');
+    await page.getByRole('button', { name: 'Salvar mapeamento' }).click();
+    await page.getByRole('button', { name: 'Validar todas as linhas' }).click();
+    await page.getByRole('button', { name: 'Confirmar importação' }).click();
+    await expect(
+        page.getByRole('heading', { name: 'Resultado da importação' }),
+    ).toBeVisible();
+
+    await page.goto('/companies');
+    await page
+        .locator('a[href^="/companies/"]')
+        .filter({ hasText: companyName })
+        .first()
+        .click();
+    await expect(
+        page.getByRole('heading', { name: 'Prospecção Comercial' }),
+    ).toBeVisible();
+    await expect(
+        page.getByText('Primeiro contato', { exact: true }),
+    ).toBeVisible();
+});
+
 test('owner imports one contact linked to multiple existing companies', async ({
     page,
 }) => {

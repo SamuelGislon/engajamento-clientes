@@ -30,6 +30,7 @@ type ImportRecord = {
     status: string;
     original_filename: string;
     journey_mode: string;
+    journey_template: { id: number; name: string } | null;
     mapping: Record<string, number> | null;
     total_rows: number;
     valid_rows: number;
@@ -44,6 +45,7 @@ type ImportRecord = {
 };
 
 type FieldOption = { label: string; required: boolean };
+type JourneyTemplateOption = { id: number; name: string; is_default: boolean };
 
 function dateLabel(value: string): string {
     return new Intl.DateTimeFormat('pt-BR', {
@@ -57,11 +59,13 @@ export default function ImportShow({
     preview,
     fileError,
     fields,
+    journeyTemplates,
 }: {
     import: ImportRecord;
     preview: Preview | null;
     fileError: string | null;
     fields: Record<string, FieldOption>;
+    journeyTemplates: JourneyTemplateOption[];
 }) {
     const form = useForm({
         mapping: Object.fromEntries(
@@ -72,6 +76,10 @@ export default function ImportShow({
                     : String(importRecord.mapping[field]),
             ]),
         ) as Record<string, string>,
+        journey_mode: importRecord.journey_mode,
+        journey_template_id: importRecord.journey_template
+            ? String(importRecord.journey_template.id)
+            : '',
     });
     const actionForm = useForm({});
     const actionErrors = Object.values(actionForm.errors).filter(
@@ -133,6 +141,18 @@ export default function ImportShow({
                             {importRecord.team && (
                                 <p className="mt-1 text-sm text-muted-foreground">
                                     Equipe de destino: {importRecord.team.name}
+                                </p>
+                            )}
+                            {importRecord.record_type === 'companies' && (
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                    Jornadas:{' '}
+                                    {importRecord.journey_mode === 'none'
+                                        ? 'não iniciar'
+                                        : importRecord.journey_mode ===
+                                            'default'
+                                          ? 'jornada padrão'
+                                          : (importRecord.journey_template
+                                                ?.name ?? 'jornada específica')}
                                 </p>
                             )}
                         </div>
@@ -339,6 +359,125 @@ export default function ImportShow({
                                     ),
                                 )}
                             </div>
+                            {importRecord.record_type === 'companies' && (
+                                <div className="mt-5 grid gap-4 rounded-xl border border-border/70 p-4 sm:grid-cols-2">
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="journey_mode">
+                                            Jornadas para prospectos novos
+                                        </Label>
+                                        <select
+                                            id="journey_mode"
+                                            value={form.data.journey_mode}
+                                            onChange={(event) => {
+                                                form.setData(
+                                                    'journey_mode',
+                                                    event.target.value,
+                                                );
+                                                if (
+                                                    event.target.value !==
+                                                    'template'
+                                                ) {
+                                                    form.setData(
+                                                        'journey_template_id',
+                                                        '',
+                                                    );
+                                                }
+                                            }}
+                                            className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                                        >
+                                            <option value="none">
+                                                Não iniciar jornadas
+                                            </option>
+                                            <option value="default">
+                                                Utilizar a jornada padrão
+                                            </option>
+                                            <option value="template">
+                                                Selecionar uma jornada
+                                                específica
+                                            </option>
+                                        </select>
+                                        <InputError
+                                            message={form.errors.journey_mode}
+                                        />
+                                    </div>
+                                    {form.data.journey_mode === 'template' && (
+                                        <div className="grid content-start gap-2">
+                                            <Label htmlFor="journey_template_id">
+                                                Jornada de prospecção
+                                            </Label>
+                                            <select
+                                                id="journey_template_id"
+                                                value={
+                                                    form.data
+                                                        .journey_template_id
+                                                }
+                                                onChange={(event) =>
+                                                    form.setData(
+                                                        'journey_template_id',
+                                                        event.target.value,
+                                                    )
+                                                }
+                                                className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                                            >
+                                                <option value="">
+                                                    Selecione um modelo ativo
+                                                </option>
+                                                {importRecord.journey_template &&
+                                                    !journeyTemplates.some(
+                                                        (template) =>
+                                                            template.id ===
+                                                            importRecord
+                                                                .journey_template
+                                                                ?.id,
+                                                    ) && (
+                                                        <option
+                                                            value={String(
+                                                                importRecord
+                                                                    .journey_template
+                                                                    .id,
+                                                            )}
+                                                            disabled
+                                                        >
+                                                            {
+                                                                importRecord
+                                                                    .journey_template
+                                                                    .name
+                                                            }{' '}
+                                                            (desativada)
+                                                        </option>
+                                                    )}
+                                                {journeyTemplates.map(
+                                                    (template) => (
+                                                        <option
+                                                            key={template.id}
+                                                            value={String(
+                                                                template.id,
+                                                            )}
+                                                        >
+                                                            {template.name}
+                                                            {template.is_default
+                                                                ? ' (padrão)'
+                                                                : ''}
+                                                        </option>
+                                                    ),
+                                                )}
+                                            </select>
+                                            <InputError
+                                                message={
+                                                    form.errors
+                                                        .journey_template_id
+                                                }
+                                            />
+                                        </div>
+                                    )}
+                                    <p className="text-xs text-muted-foreground sm:col-span-2">
+                                        Só empresas novas elegíveis como
+                                        prospectos iniciam uma jornada. Você
+                                        pode alterar esta opção antes de
+                                        confirmar a importação.
+                                    </p>
+                                </div>
+                            )}
                             {form.errors.mapping && (
                                 <p
                                     role="alert"
@@ -349,8 +488,8 @@ export default function ImportShow({
                             )}
                             <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                                 <p className="text-xs text-muted-foreground">
-                                    Salvar o mapeamento não grava empresas na
-                                    carteira.
+                                    Salvar o mapeamento e a opção de jornada não
+                                    grava dados comerciais na carteira.
                                 </p>
                                 <Button
                                     type="submit"

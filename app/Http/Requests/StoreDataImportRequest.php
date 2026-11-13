@@ -30,8 +30,17 @@ class StoreDataImportRequest extends FormRequest
     {
         return [
             'record_type' => ['required', 'string', Rule::in(['companies', 'contacts', 'sales'])],
-            'journey_mode' => ['required', 'string', Rule::in(['none'])],
-            'journey_template_id' => ['prohibited'],
+            'journey_mode' => ['required', 'string', Rule::in(['none', 'default', 'template'])],
+            'journey_template_id' => [
+                'nullable',
+                'required_if:journey_mode,template',
+                'prohibited_unless:journey_mode,template',
+                'integer',
+                Rule::exists('journey_templates', 'id')
+                    ->where('organization_id', app(TenantContext::class)->id())
+                    ->where('is_active', true)
+                    ->where('type', 'prospecting'),
+            ],
             'team_id' => [
                 'nullable',
                 'integer',
@@ -47,6 +56,11 @@ class StoreDataImportRequest extends FormRequest
     public function after(): array
     {
         return [function (Validator $validator): void {
+            if ($this->input('record_type') !== 'companies'
+                && ($this->input('journey_mode') !== 'none' || $this->filled('journey_template_id'))) {
+                $validator->errors()->add('journey_mode', 'Escolha jornadas somente ao importar empresas.');
+            }
+
             $user = $this->user();
             $organizationId = app(TenantContext::class)->id();
             $role = $user?->roleIn($organizationId);

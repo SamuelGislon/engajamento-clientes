@@ -19,6 +19,7 @@ use App\Http\Requests\SaveDataImportMappingRequest;
 use App\Http\Requests\StoreDataImportRequest;
 use App\Models\Company;
 use App\Models\DataImport;
+use App\Models\JourneyTemplate;
 use App\Models\Organization;
 use App\Models\Team;
 use Illuminate\Http\RedirectResponse;
@@ -78,6 +79,12 @@ class DataImportController extends Controller
                     ->where('team_memberships.is_active', true)))
                 ->orderBy('name')
                 ->get(['id', 'name']),
+            'journeyTemplates' => JourneyTemplate::query()
+                ->where('is_active', true)
+                ->where('type', 'prospecting')
+                ->orderByDesc('is_default')
+                ->orderBy('name')
+                ->get(['id', 'name', 'is_default']),
         ]);
     }
 
@@ -149,6 +156,7 @@ class DataImportController extends Controller
                 'status' => $record->status,
                 'original_filename' => $record->original_filename,
                 'journey_mode' => $record->journey_mode,
+                'journey_template' => $record->journeyTemplate?->only(['id', 'name']),
                 'mapping' => $record->mapping,
                 'validation_errors' => $record->validation_errors ?? [],
                 'total_rows' => $record->total_rows,
@@ -164,6 +172,14 @@ class DataImportController extends Controller
             'preview' => $preview,
             'fileError' => $fileError,
             'fields' => $this->fieldsFor($record),
+            'journeyTemplates' => $record->record_type === 'companies'
+                ? JourneyTemplate::query()
+                    ->where('is_active', true)
+                    ->where('type', 'prospecting')
+                    ->orderByDesc('is_default')
+                    ->orderBy('name')
+                    ->get(['id', 'name', 'is_default'])
+                : [],
         ]);
     }
 
@@ -179,8 +195,9 @@ class DataImportController extends Controller
         }
 
         $preview = $this->previewRecord($record, $previewReader);
+        $validated = $request->validated();
         $mapping = array_filter(
-            $request->validated('mapping'),
+            $validated['mapping'],
             fn (mixed $columnIndex): bool => $columnIndex !== null && $columnIndex !== '',
         );
         $fieldOptions = $this->fieldsFor($record);
@@ -212,7 +229,7 @@ class DataImportController extends Controller
             throw ValidationException::withMessages($errors);
         }
 
-        $record->update([
+        $attributes = [
             'mapping' => $normalizedMapping,
             'status' => 'mapped',
             'validation_errors' => null,
@@ -223,7 +240,25 @@ class DataImportController extends Controller
             'created_rows' => 0,
             'updated_rows' => 0,
             'skipped_rows' => 0,
-        ]);
+        ];
+
+        if ($record->record_type === 'companies' && array_key_exists('journey_mode', $validated)) {
+            $attributes['journey_mode'] = $validated['journey_mode'];
+            $attributes['journey_template_id'] = $validated['journey_mode'] === 'template'
+                ? ($validated['journey_template_id'] ?? null)
+                : null;
+        }
+
+        DB::transaction(function () use ($request, $dataImport, $attributes): void {
+            $lockedRecord = DataImport::query()->lockForUpdate()->findOrFail($dataImport);
+            Gate::forUser($request->user())->authorize('update', $lockedRecord);
+
+            if (in_array($lockedRecord->status, ['completed', 'expired'], true)) {
+                throw ValidationException::withMessages(['mapping' => 'Este lote já foi confirmado e não pode mais ser alterado.']);
+            }
+
+            $lockedRecord->update($attributes);
+        });
 
         return redirect()->route('imports.show', $record->id)->with('success', 'Mapeamento salvo para este lote.');
     }
@@ -311,8 +346,33 @@ class DataImportController extends Controller
                 throw ValidationException::withMessages(['mapping' => 'Salve o mapeamento antes de confirmar a importação.']);
             }
 
-            Organization::query()->lockForUpdate()->findOrFail($batch->organization_id);
+            $organization = Organization::query()->lockForUpdate()->findOrFail($batch->organization_id);
             Gate::authorize('update', $batch);
+
+            $journeyTemplate = null;
+
+            if ($batch->record_type === 'companies') {
+                $journeyTemplate = match ($batch->journey_mode) {
+                    'none' => null,
+                    'default' => $journeys->ensureDefaultTemplate($organization),
+                    'template' => JourneyTemplate::query()
+                        ->where('organization_id', $batch->organization_id)
+                        ->where('is_active', true)
+                        ->where('type', 'prospecting')
+                        ->lockForUpdate()
+                        ->find($batch->journey_template_id),
+                    default => throw ValidationException::withMessages([
+                        'journey_mode' => 'Escolha uma opção válida para a jornada.',
+                    ]),
+                };
+
+                if ($batch->journey_mode === 'template'
+                    && $journeyTemplate === null) {
+                    throw ValidationException::withMessages([
+                        'journey_template_id' => 'O modelo selecionado foi desativado ou não está mais disponível. Escolha outro modelo ou nenhuma jornada, salve o mapeamento e tente novamente.',
+                    ]);
+                }
+            }
 
             try {
                 $preview = $this->previewRecord($batch, $previewReader, SpreadsheetPreviewReader::MAX_ROWS);
@@ -337,7 +397,6 @@ class DataImportController extends Controller
                 $createdRows = $importResult['createdRows'];
                 $raceDuplicates = $importResult['duplicateRows'];
                 $raceInvalidRows = $importResult['invalidRows'];
-                $analysis['invalidRows'] += $raceInvalidRows;
                 $analysis['errors'] = array_merge($analysis['errors'], $importResult['errors']);
             } elseif ($batch->record_type === 'sales') {
                 $analysis = $saleImports->analyze(
@@ -352,7 +411,6 @@ class DataImportController extends Controller
                 $createdRows = $importResult['createdRows'];
                 $raceDuplicates = $importResult['duplicateRows'];
                 $raceInvalidRows = $importResult['invalidRows'];
-                $analysis['invalidRows'] += $raceInvalidRows;
                 $analysis['errors'] = array_merge($analysis['errors'], $importResult['errors']);
             } elseif ($batch->record_type !== 'companies') {
                 abort(422);
@@ -378,7 +436,31 @@ class DataImportController extends Controller
                         );
 
                         if (! $company->wasRecentlyCreated) {
-                            $raceDuplicates++;
+                            $canViewExistingCompany = Company::query()
+                                ->where('organization_id', $batch->organization_id)
+                                ->visibleTo($request->user())
+                                ->whereKey($company->id)
+                                ->exists();
+
+                            if ($canViewExistingCompany) {
+                                $raceDuplicates++;
+                                $error = [
+                                    'line' => $row['line'],
+                                    'type' => 'duplicate',
+                                    'message' => 'A empresa passou a existir durante a importação; a linha foi ignorada com segurança.',
+                                ];
+                            } else {
+                                $raceInvalidRows++;
+                                $error = [
+                                    'line' => $row['line'],
+                                    'type' => 'invalid',
+                                    'message' => 'A linha não pode ser importada no escopo de acesso atual.',
+                                ];
+                            }
+
+                            if (count($analysis['errors']) < 100) {
+                                $analysis['errors'][] = $error;
+                            }
 
                             continue;
                         }
@@ -387,20 +469,26 @@ class DataImportController extends Controller
                     }
 
                     $scores->recalculateForCompany($company, 'Importação de planilha');
+
+                    if ($journeyTemplate !== null && $company->relationship_status === 'prospect') {
+                        $journeys->enrollManually($company, $journeyTemplate, $request->user());
+                    }
+
                     $createdRows++;
                 }
             }
 
             $duplicateRows = $analysis['duplicateRows'] + $raceDuplicates;
+            $invalidRows = $analysis['invalidRows'] + $raceInvalidRows;
             $batch->update([
                 'status' => 'completed',
                 'total_rows' => $analysis['totalRows'],
                 'valid_rows' => count($analysis['validRows']) - $raceDuplicates - $raceInvalidRows,
-                'invalid_rows' => $analysis['invalidRows'],
+                'invalid_rows' => $invalidRows,
                 'duplicate_rows' => $duplicateRows,
                 'created_rows' => $createdRows,
                 'updated_rows' => 0,
-                'skipped_rows' => $analysis['invalidRows'] + $duplicateRows,
+                'skipped_rows' => $invalidRows + $duplicateRows,
                 'validation_errors' => $analysis['errors'],
                 'confirmed_at' => now(),
             ]);

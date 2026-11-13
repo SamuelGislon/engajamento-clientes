@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Domain\Imports\CompanyImportService;
+use App\Domain\Imports\SpreadsheetPreviewReader;
 use App\Domain\Tenancy\TenantContext;
 use App\Models\Company;
 use App\Models\Contact;
@@ -16,6 +17,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Inertia\Testing\AssertableInertia;
 use OpenSpout\Common\Entity\Row;
 use OpenSpout\Writer\XLSX\Writer;
 use Tests\TestCase;
@@ -730,6 +732,378 @@ class DataImportTest extends TestCase
         $response->assertRedirect('/imports');
         $response->assertSessionHasErrors('journey_template_id');
         $this->assertDatabaseCount('data_imports', 0);
+    }
+
+    public function test_company_import_can_start_the_selected_default_journey_for_eligible_prospects(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create(['auto_enroll_default_journey' => false]);
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'companies',
+            'journey_mode' => 'default',
+            'file' => UploadedFile::fake()->createWithContent('companies.csv', "name,relationship_status\nProspecto Selecionado,prospect\nCliente Sem Jornada,customer\n"),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $mapping = ['name' => '0', 'relationship_status' => '1'];
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', ['mapping' => $mapping])
+            ->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $prospect = Company::query()->where('name', 'Prospecto Selecionado')->firstOrFail();
+        $customer = Company::query()->where('name', 'Cliente Sem Jornada')->firstOrFail();
+        $this->assertDatabaseHas('journey_enrollments', [
+            'organization_id' => $organization->id,
+            'company_id' => $prospect->id,
+            'status' => 'active',
+        ]);
+        $this->assertDatabaseHas('tasks', [
+            'organization_id' => $organization->id,
+            'company_id' => $prospect->id,
+            'origin' => 'automatic',
+        ]);
+        $this->assertDatabaseMissing('journey_enrollments', ['company_id' => $customer->id]);
+        $this->assertDatabaseMissing('tasks', ['company_id' => $customer->id, 'origin' => 'automatic']);
+    }
+
+    public function test_company_import_can_start_a_specific_active_prospecting_journey(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $template = JourneyTemplate::query()->create([
+            'name' => 'Jornada importada escolhida',
+            'type' => 'prospecting',
+            'trigger_type' => 'manual',
+            'is_active' => true,
+            'is_default' => false,
+        ]);
+        $template->steps()->create([
+            'title' => 'Contato inicial',
+            'position' => 1,
+            'delay_days' => 2,
+            'task_title' => 'Falar com {company} pela jornada escolhida.',
+            'task_type' => 'first_contact',
+            'task_priority' => 'normal',
+        ]);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'companies',
+            'journey_mode' => 'template',
+            'journey_template_id' => $template->id,
+            'file' => UploadedFile::fake()->createWithContent('companies.csv', "name\nProspecto Jornada Escolhida\n"),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->from('/imports/'.$importId)->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0'],
+            'journey_mode' => 'template',
+        ])->assertRedirect('/imports/'.$importId)
+            ->assertSessionHasErrors('journey_template_id');
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0'],
+            'journey_mode' => 'template',
+            'journey_template_id' => (string) $template->id,
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $company = Company::query()->where('name', 'Prospecto Jornada Escolhida')->firstOrFail();
+        $this->assertDatabaseHas('journey_enrollments', [
+            'organization_id' => $organization->id,
+            'journey_template_id' => $template->id,
+            'company_id' => $company->id,
+            'status' => 'active',
+        ]);
+        $this->assertDatabaseHas('tasks', [
+            'organization_id' => $organization->id,
+            'company_id' => $company->id,
+            'title' => 'Falar com Prospecto Jornada Escolhida pela jornada escolhida.',
+            'origin' => 'automatic',
+        ]);
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $importId,
+            'journey_mode' => 'template',
+            'journey_template_id' => $template->id,
+        ]);
+    }
+
+    public function test_company_importer_can_change_journey_after_the_selected_template_is_deactivated(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $template = JourneyTemplate::query()->create([
+            'name' => 'Jornada que será desativada',
+            'type' => 'prospecting',
+            'trigger_type' => 'manual',
+            'is_active' => true,
+            'is_default' => false,
+        ]);
+        $template->steps()->create([
+            'title' => 'Contato inicial',
+            'position' => 1,
+            'delay_days' => 2,
+            'task_title' => 'Falar com {company}',
+            'task_type' => 'first_contact',
+            'task_priority' => 'normal',
+        ]);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'companies',
+            'journey_mode' => 'template',
+            'journey_template_id' => $template->id,
+            'file' => UploadedFile::fake()->createWithContent('companies.csv', "name\nProspecto Recuperável\n"),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+
+        $template->update(['is_active' => false]);
+
+        $this->from('/imports/'.$importId)->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId)
+            ->assertSessionHasErrors('journey_template_id');
+        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'status' => 'validated']);
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0'],
+            'journey_mode' => 'none',
+            'journey_template_id' => '',
+        ])->assertRedirect('/imports/'.$importId);
+
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $importId,
+            'status' => 'mapped',
+            'journey_mode' => 'none',
+            'journey_template_id' => null,
+        ]);
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $company = Company::query()->where('name', 'Prospecto Recuperável')->firstOrFail();
+        $this->assertDatabaseMissing('journey_enrollments', ['company_id' => $company->id]);
+    }
+
+    public function test_a_salesperson_is_not_told_that_a_company_duplicate_is_outside_their_portfolio(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $otherSalesperson = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        $organization->users()->attach($otherSalesperson, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        Company::factory()->ownedBy($otherSalesperson)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa de outra carteira',
+            'tax_id' => '12345678000195',
+        ]);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($salesperson)->withSession($session)->post('/imports', [
+            'record_type' => 'companies',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('companies.csv', "name,tax_id\nEmpresa Importada,12345678000195\n"),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'tax_id' => '1'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+
+        $batch = DataImport::query()->findOrFail($importId);
+        $this->assertSame(0, $batch->duplicate_rows);
+        $this->assertSame(1, $batch->invalid_rows);
+        $this->assertSame('A linha não pode ser importada no escopo de acesso atual.', $batch->validation_errors[0]['message']);
+    }
+
+    public function test_a_hidden_company_collision_during_confirmation_is_counted_as_invalid(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $otherSalesperson = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        $organization->users()->attach($otherSalesperson, ['role' => 'salesperson']);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($salesperson)->withSession($session)->post('/imports', [
+            'record_type' => 'companies',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('companies.csv', "name,tax_id\nEmpresa Concorrente,12345678000195\n"),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'tax_id' => '1'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+
+        $realService = new CompanyImportService;
+        $raceService = \Mockery::mock(CompanyImportService::class);
+        $raceService->shouldReceive('analyze')->once()->andReturnUsing(
+            function (
+                DataImport $batch,
+                User $actor,
+                array $rows,
+                int $totalRows,
+                bool $lockDestination = false,
+                array $malformedRows = [],
+            ) use ($realService, $organization, $otherSalesperson): array {
+                $analysis = $realService->analyze($batch, $actor, $rows, $totalRows, $lockDestination, $malformedRows);
+                Company::factory()->ownedBy($otherSalesperson)->create([
+                    'organization_id' => $organization->id,
+                    'name' => 'Registro em outra carteira',
+                    'tax_id' => '12345678000195',
+                ]);
+
+                return $analysis;
+            },
+        );
+        app()->instance(CompanyImportService::class, $raceService);
+
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $importId,
+            'status' => 'completed',
+            'valid_rows' => 0,
+            'invalid_rows' => 1,
+            'duplicate_rows' => 0,
+            'created_rows' => 0,
+            'skipped_rows' => 1,
+        ]);
+    }
+
+    public function test_saving_a_mapping_does_not_reopen_an_import_completed_during_preview(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $path = 'imports/'.$organization->id.'/companies.csv';
+        Storage::disk('local')->put($path, "name\nNova empresa\n");
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'status' => 'validated',
+            'mapping' => ['name' => 0],
+            'file_path' => $path,
+        ]);
+        $previewReader = \Mockery::mock(SpreadsheetPreviewReader::class);
+        $previewReader->shouldReceive('preview')->once()->andReturnUsing(
+            function () use ($batch): array {
+                DB::table('data_imports')->where('id', $batch->id)->update(['status' => 'completed']);
+
+                return [
+                    'sheetName' => 'Sheet1',
+                    'headers' => ['Nome'],
+                    'rows' => [['Nova empresa']],
+                    'totalRows' => 1,
+                    'malformedRows' => [],
+                ];
+            },
+        );
+        app()->instance(SpreadsheetPreviewReader::class, $previewReader);
+
+        $this->from('/imports/'.$batch->id)->actingAs($owner)
+            ->withSession(['active_organization_id' => $organization->id])
+            ->post('/imports/'.$batch->id.'/mapping', [
+                'mapping' => ['name' => '0'],
+                'journey_mode' => 'none',
+            ])
+            ->assertRedirect('/imports/'.$batch->id)
+            ->assertSessionHasErrors('mapping');
+
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $batch->id,
+            'status' => 'completed',
+            'mapping->name' => 0,
+        ]);
+    }
+
+    public function test_import_page_only_lists_active_prospecting_templates_for_the_current_organization(): void
+    {
+        $organization = Organization::factory()->create();
+        $otherOrganization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $selectedTemplate = JourneyTemplate::query()->create([
+            'name' => 'Jornada de prospecção ativa',
+            'type' => 'prospecting',
+            'trigger_type' => 'manual',
+            'is_active' => true,
+            'is_default' => false,
+        ]);
+        JourneyTemplate::query()->create([
+            'name' => 'Jornada pós-venda ativa',
+            'type' => 'post_sale',
+            'trigger_type' => 'first_sale',
+            'is_active' => true,
+            'is_default' => false,
+        ]);
+        JourneyTemplate::query()->create([
+            'name' => 'Jornada de prospecção arquivada',
+            'type' => 'prospecting',
+            'trigger_type' => 'manual',
+            'is_active' => false,
+            'is_default' => false,
+        ]);
+        app(TenantContext::class)->set($otherOrganization);
+        JourneyTemplate::query()->create([
+            'name' => 'Jornada de outra organização',
+            'type' => 'prospecting',
+            'trigger_type' => 'manual',
+            'is_active' => true,
+            'is_default' => false,
+        ]);
+
+        $this->actingAs($owner)
+            ->withSession(['active_organization_id' => $organization->id])
+            ->get('/imports')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('imports/index')
+                ->has('journeyTemplates', 1)
+                ->where('journeyTemplates.0.id', $selectedTemplate->id)
+                ->where('journeyTemplates.0.name', 'Jornada de prospecção ativa'));
     }
 
     public function test_a_user_without_an_active_membership_cannot_create_an_import_batch(): void

@@ -30,6 +30,7 @@ type ImportRecord = {
 
 type PageLink = { url: string | null; label: string; active: boolean };
 type TeamOption = { id: number; name: string };
+type JourneyTemplateOption = { id: number; name: string; is_default: boolean };
 
 const recordTypes = [
     { value: 'companies', label: 'Empresas' },
@@ -60,6 +61,7 @@ export default function ImportsIndex({
     imports,
     role,
     teams,
+    journeyTemplates,
 }: {
     imports: {
         data: ImportRecord[];
@@ -70,6 +72,7 @@ export default function ImportsIndex({
     };
     role: string;
     teams: TeamOption[];
+    journeyTemplates: JourneyTemplateOption[];
 }) {
     const form = useForm({
         record_type: 'companies',
@@ -132,12 +135,21 @@ export default function ImportsIndex({
                                 <select
                                     id="record_type"
                                     value={form.data.record_type}
-                                    onChange={(event) =>
-                                        form.setData(
-                                            'record_type',
-                                            event.target.value,
-                                        )
-                                    }
+                                    onChange={(event) => {
+                                        const recordType = event.target.value;
+                                        form.setData('record_type', recordType);
+
+                                        if (recordType !== 'companies') {
+                                            form.setData(
+                                                'journey_mode',
+                                                'none',
+                                            );
+                                            form.setData(
+                                                'journey_template_id',
+                                                '',
+                                            );
+                                        }
+                                    }}
                                     className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                                 >
                                     {recordTypes.map((recordType) => (
@@ -207,14 +219,104 @@ export default function ImportsIndex({
                                 </Field>
                             )}
 
+                            {form.data.record_type === 'companies' && (
+                                <>
+                                    <Field
+                                        label="Jornadas para os prospectos importados"
+                                        id="journey_mode"
+                                        error={form.errors.journey_mode}
+                                    >
+                                        <select
+                                            id="journey_mode"
+                                            value={form.data.journey_mode}
+                                            onChange={(event) => {
+                                                form.setData(
+                                                    'journey_mode',
+                                                    event.target.value,
+                                                );
+                                                if (
+                                                    event.target.value !==
+                                                    'template'
+                                                ) {
+                                                    form.setData(
+                                                        'journey_template_id',
+                                                        '',
+                                                    );
+                                                }
+                                            }}
+                                            className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                                        >
+                                            <option value="none">
+                                                Não iniciar jornadas
+                                            </option>
+                                            <option value="default">
+                                                Utilizar a jornada padrão
+                                            </option>
+                                            <option value="template">
+                                                Selecionar uma jornada
+                                                específica
+                                            </option>
+                                        </select>
+                                        <span className="text-xs text-muted-foreground">
+                                            Só prospectos elegíveis iniciam uma
+                                            jornada. Cada inscrição pode criar a
+                                            primeira tarefa automática.
+                                        </span>
+                                    </Field>
+
+                                    {form.data.journey_mode === 'template' && (
+                                        <Field
+                                            label="Jornada de prospecção"
+                                            id="journey_template_id"
+                                            error={
+                                                form.errors.journey_template_id
+                                            }
+                                            required
+                                        >
+                                            <select
+                                                id="journey_template_id"
+                                                value={
+                                                    form.data
+                                                        .journey_template_id
+                                                }
+                                                onChange={(event) =>
+                                                    form.setData(
+                                                        'journey_template_id',
+                                                        event.target.value,
+                                                    )
+                                                }
+                                                className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                                            >
+                                                <option value="">
+                                                    Selecione um modelo
+                                                </option>
+                                                {journeyTemplates.map(
+                                                    (template) => (
+                                                        <option
+                                                            key={template.id}
+                                                            value={template.id}
+                                                        >
+                                                            {template.name}
+                                                            {template.is_default
+                                                                ? ' (padrão)'
+                                                                : ''}
+                                                        </option>
+                                                    ),
+                                                )}
+                                            </select>
+                                        </Field>
+                                    )}
+                                </>
+                            )}
+
                             <div className="flex items-start gap-2 rounded-xl bg-muted/40 p-3 text-sm text-muted-foreground">
                                 <ShieldCheck className="mt-0.5 size-4 shrink-0 text-primary" />
                                 <p>
                                     Empresas, contatos, vínculos e vendas são
                                     validados no servidor conforme o tenant e a
-                                    carteira. Na confirmação, cada modalidade
-                                    aplica suas regras comerciais; opções de
-                                    jornada ainda estão em desenvolvimento.
+                                    carteira. Jornadas são iniciadas apenas
+                                    quando escolhidas e só para prospectos
+                                    elegíveis.
                                 </p>
                             </div>
 
