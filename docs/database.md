@@ -15,7 +15,9 @@
 - `journey_enrollments`: inscrição de empresa em modelo, estado, responsável e datas de ciclo de vida.
 - `journey_step_executions`: execução única por inscrição e etapa, com vencimento planejado e conclusão.
 - `sales`: compras manuais com `decimal(14,2)`, moeda BRL, vendedor, autor, identificador externo opcional, timestamp UTC, estado confirmado/cancelado e metadados de cancelamento.
-- `commercial_settings`: uma configuração por organização para limites de inatividade, repetição, frequência por faixa, regras de pontuação e modelos de jornada selecionados.
+- `commercial_settings`: uma configuração por organização para limites de inatividade, repetição, frequência por faixa, pesos e bandas de pontuação, nomes/cores/limites das faixas e modelos de jornada selecionados. As regras estruturadas permanecem em JSON nesta fase.
+- `commercial_score_recalculations`: operações tenant-first de recálculo de pontuação, com solicitante, estado (inclui substituída), tentativa, total/progresso, cursor da última empresa, motivo, snapshot JSON das regras e horários de início/conclusão/falha. O cursor não é FK, pois representa um ponto de retomada e precisa sobreviver à remoção de um registro durante a execução.
+- `customer_score_histories`: snapshots imutáveis da pontuação, incluindo o nome e a cor da faixa vigentes no momento do cálculo.
 - `customer_scores`: composição atual do score por empresa, critérios manuais opcionais, completude, faixa e horário de cálculo.
 - `customer_score_histories`: snapshots auditáveis da composição, faixa, justificativa e data de alteração.
 - `commercial_alert_occurrences`: ocorrência idempotente de inatividade comercial ou de relacionamento, com chave, período, motivo, tarefa e contato recomendados, estado e resolução.

@@ -140,6 +140,8 @@ type CustomerScore = {
     relationship_points: number | null;
     total_score: number | null;
     tier: string | null;
+    tier_name: string | null;
+    tier_color: string | null;
     is_complete: boolean;
     last_calculated_at: string | null;
 };
@@ -151,6 +153,8 @@ type ScoreHistory = {
     relationship_points: number | null;
     total_score: number | null;
     tier: string | null;
+    tier_name: string | null;
+    tier_color: string | null;
     is_complete: boolean;
     reason: string;
     recorded_at: string;
@@ -244,6 +248,7 @@ export default function CompanyShow({
     salesSummary,
     salesTimezone,
     customerScore,
+    scoringWeights,
     scoreHistory,
 }: {
     company: Company;
@@ -261,6 +266,12 @@ export default function CompanyShow({
     salesSummary: SalesSummary;
     salesTimezone: string;
     customerScore: CustomerScore | null;
+    scoringWeights: {
+        volume: number;
+        frequency: number;
+        potential: number;
+        relationship: number;
+    };
     scoreHistory: ScoreHistory[];
 }) {
     const [owner, setOwner] = useState(String(company.owner_user_id ?? ''));
@@ -780,23 +791,33 @@ export default function CompanyShow({
                                     critérios manuais completam a nota.
                                 </p>
                             </div>
-                            <span className="rounded-full bg-muted px-3 py-1 text-sm font-semibold">
+                            <span
+                                className="rounded-full px-3 py-1 text-sm font-semibold"
+                                style={
+                                    customerScore?.tier_color
+                                        ? {
+                                              backgroundColor: `${customerScore.tier_color}22`,
+                                              color: customerScore.tier_color,
+                                          }
+                                        : undefined
+                                }
+                            >
                                 {customerScore?.is_complete
-                                    ? `Faixa ${customerScore.tier} · ${customerScore.total_score}/100`
+                                    ? `${customerScore.tier_name ?? `Faixa ${customerScore.tier}`} · ${customerScore.total_score}/100`
                                     : 'Dados incompletos'}
                             </span>
                         </div>
                         <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                             <CommercialMetric
-                                label="Volume · até 40"
+                                label={`Volume · até ${scoringWeights.volume}`}
                                 value={`${customerScore?.volume_points ?? 0} pts`}
                             />
                             <CommercialMetric
-                                label="Frequência · até 20"
+                                label={`Frequência · até ${scoringWeights.frequency}`}
                                 value={`${customerScore?.frequency_points ?? 0} pts`}
                             />
                             <CommercialMetric
-                                label="Potencial · até 20"
+                                label={`Potencial · até ${scoringWeights.potential}`}
                                 value={
                                     customerScore?.potential_points === null ||
                                     customerScore?.potential_points ===
@@ -806,7 +827,7 @@ export default function CompanyShow({
                                 }
                             />
                             <CommercialMetric
-                                label="Relacionamento · até 20"
+                                label={`Relacionamento · até ${scoringWeights.relationship}`}
                                 value={
                                     customerScore?.relationship_points ===
                                         null ||
@@ -822,11 +843,12 @@ export default function CompanyShow({
                             className="mt-5 grid gap-4 sm:grid-cols-2"
                         >
                             <label className="grid gap-2 text-sm font-medium">
-                                Potencial comercial (0–20)
+                                Potencial comercial (0–
+                                {scoringWeights.potential})
                                 <Input
                                     type="number"
                                     min="0"
-                                    max="20"
+                                    max={scoringWeights.potential}
                                     step="1"
                                     value={scoreForm.data.potential_points}
                                     onChange={(event) =>
@@ -841,11 +863,12 @@ export default function CompanyShow({
                                 />
                             </label>
                             <label className="grid gap-2 text-sm font-medium">
-                                Facilidade de acesso e relacionamento (0–20)
+                                Facilidade de acesso e relacionamento (0–
+                                {scoringWeights.relationship})
                                 <Input
                                     type="number"
                                     min="0"
-                                    max="20"
+                                    max={scoringWeights.relationship}
                                     step="1"
                                     value={scoreForm.data.relationship_points}
                                     onChange={(event) =>
@@ -893,9 +916,19 @@ export default function CompanyShow({
                                         className="py-3 first:pt-0 last:pb-0"
                                     >
                                         <div className="flex items-center justify-between gap-3 text-sm">
-                                            <span className="font-medium">
+                                            <span
+                                                className="rounded-full px-2 py-1 font-medium"
+                                                style={
+                                                    entry.tier_color
+                                                        ? {
+                                                              backgroundColor: `${entry.tier_color}22`,
+                                                              color: entry.tier_color,
+                                                          }
+                                                        : undefined
+                                                }
+                                            >
                                                 {entry.is_complete
-                                                    ? `Faixa ${entry.tier} · ${entry.total_score}/100`
+                                                    ? `${entry.tier_name ?? `Faixa ${entry.tier}`} · ${entry.total_score}/100`
                                                     : 'Classificação incompleta'}
                                             </span>
                                             <span className="text-xs text-muted-foreground">

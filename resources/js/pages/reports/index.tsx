@@ -50,7 +50,7 @@ type RelationshipCompany = {
     active_journeys_count: number;
     owner: { id: number; name: string } | null;
     team: { id: number; name: string } | null;
-    customer_score: { tier: string | null } | null;
+    customer_score: { tier: string | null; tier_name: string | null } | null;
 };
 type AttentionTask = {
     id: number;
@@ -139,6 +139,7 @@ export default function CommercialReports({
     relationshipCompanies,
     salesByMonth,
     salesByTeam,
+    tiers,
 }: {
     summary: {
         companies: number;
@@ -191,6 +192,7 @@ export default function CommercialReports({
         sales_count: number;
         revenue: string;
     }[];
+    tiers: { key: 'A' | 'B' | 'C' | 'D'; name: string; color: string }[];
 }) {
     const form = useForm({
         from: filters.from,
@@ -546,9 +548,9 @@ export default function CommercialReports({
                                             </span>
                                         </span>
                                         <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs">
-                                            Faixa{' '}
-                                            {company.customer_score?.tier ??
-                                                '—'}
+                                            {company.customer_score
+                                                ?.tier_name ??
+                                                `Faixa ${company.customer_score?.tier ?? '—'}`}
                                         </span>
                                     </Link>
                                 ))}
@@ -714,16 +716,16 @@ export default function CommercialReports({
                         atual.
                     </p>
                     <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                        {(['A', 'B', 'C', 'D'] as const).map((tier) => (
+                        {tiers.map((tier) => (
                             <div
-                                key={tier}
+                                key={tier.key}
                                 className="rounded-xl bg-muted/40 p-4"
                             >
                                 <span className="text-sm text-muted-foreground">
-                                    Faixa {tier}
+                                    {tier.name}
                                 </span>
                                 <p className="mt-1 text-2xl font-semibold">
-                                    {summary.tier_distribution[tier]}
+                                    {summary.tier_distribution[tier.key]}
                                 </p>
                             </div>
                         ))}

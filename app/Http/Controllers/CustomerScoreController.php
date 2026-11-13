@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Domain\Commercial\CommercialSettingsService;
 use App\Domain\Commercial\CustomerScoreService;
 use App\Domain\Teams\CommercialAccessScope;
 use App\Domain\Tenancy\TenantContext;
@@ -22,6 +23,10 @@ class CustomerScoreController extends Controller
     {
         Gate::authorize('viewAny', Company::class);
         $organizationId = app(TenantContext::class)->id();
+        $organization = app(TenantContext::class)->organization();
+        abort_if($organization === null, 404);
+        $commercialSettings = app(CommercialSettingsService::class)->forOrganization($organization);
+        $tiersByKey = collect($commercialSettings->tiers)->keyBy('key');
         $filters = $request->validate([
             'tier' => ['nullable', Rule::in(['A', 'B', 'C', 'D', 'incomplete'])],
             'owner_user_id' => ['nullable', 'integer', Rule::exists('organization_user', 'user_id')
@@ -61,8 +66,14 @@ class CustomerScoreController extends Controller
             ->orderBy('companies.name')
             ->paginate(15)
             ->withQueryString();
-        $companies->getCollection()->each(function (Company $company): void {
+        $companies->getCollection()->each(function (Company $company) use ($tiersByKey): void {
             $company->setAttribute('volume_12_months', bcadd($this->numericString($company->volume_12_months ?? '0'), '0', 2));
+
+            if ($company->customerScore !== null) {
+                $tier = $tiersByKey->get($company->customerScore->tier);
+                $company->customerScore->setAttribute('tier_name', $tier['name'] ?? null);
+                $company->customerScore->setAttribute('tier_color', $tier['color'] ?? null);
+            }
         });
 
         return Inertia::render('commercial/classification', [
@@ -79,6 +90,8 @@ class CustomerScoreController extends Controller
                 ->orderBy('name')
                 ->get(['users.id', 'users.name']) ?? collect(),
             'segments' => Company::query()->visibleTo($user)->whereNotNull('segment')->distinct()->orderBy('segment')->pluck('segment'),
+            'tiers' => $commercialSettings->tiers,
+            'scoringWeights' => $commercialSettings->scoring_weights,
         ]);
     }
 

@@ -47,12 +47,13 @@
 
 ### Classificação comercial
 
-- A pontuação usa compras confirmadas nos últimos 12 meses e os pesos padrão volume 40, frequência 20, potencial 20 e relacionamento 20. Não compara organizações diferentes.
-- Faixa de volume inicial: R$ 0 = 0 pontos; até R$ 5.000 = 8; até R$ 25.000 = 16; até R$ 75.000 = 24; até R$ 200.000 = 32; acima = 40.
-- Frequência inicial: 0 compras = 0 pontos; 1 = 5; 2 = 10; 3 = 15; 4 ou mais = 20. O intervalo conta as compras confirmadas na mesma janela de 12 meses.
-- Potencial comercial e facilidade de acesso/relacionamento são avaliações manuais inteiras de 0 a 20. Campo desconhecido permanece nulo; a faixa final fica incompleta até ambos terem valor.
-- Faixas padrão sem sobreposição: D 0–24, C 25–49, B 50–74 e A 75–100. As bandas são armazenadas por organização; na interface atual, o administrador ajusta limites de inatividade, repetição, frequência de contato e jornadas selecionadas.
-- O histórico registra a primeira composição e cada mudança de critério, total, completude ou faixa. Recalcular sem mudança não cria outro snapshot.
+- A pontuação usa compras confirmadas nos últimos 12 meses. Pesos padrão: volume 40, frequência 20, potencial 20 e relacionamento 20; a administração pode personalizá-los, e a soma precisa ser 100. Os pontos das faixas de volume/frequência e os critérios manuais não podem ultrapassar seus respectivos pesos.
+- Faixas padrão de volume: R$ 0 = 0 pontos; até R$ 5.000 = 8; até R$ 25.000 = 16; até R$ 75.000 = 24; até R$ 200.000 = 32; acima = 40. Os limites precisam crescer, somente a última faixa pode ser ilimitada, e os pontos não podem diminuir entre faixas.
+- Frequência padrão: 0 compras = 0 pontos; 1 = 5; 2 = 10; 3 = 15; 4 ou mais = 20. O intervalo conta as compras confirmadas na mesma janela de 12 meses; limites mínimos e pontos precisam crescer sem exceder o peso.
+- Potencial comercial e facilidade de acesso/relacionamento são avaliações manuais inteiras limitadas pelo peso configurado. Campo desconhecido permanece nulo; a faixa final fica incompleta até ambos terem valor.
+- Faixas padrão sem sobreposição: D 0–24, C 25–49, B 50–74 e A 75–100. A organização pode personalizar nome, cor e limites, que devem cobrir de 0 a 100 sem lacunas ou sobreposições.
+- A mudança em pesos, bandas ou limites cria uma operação de fila com snapshot das regras e recalcula somente empresas que já têm classificação, em lotes transacionais de até 50. O cursor e o progresso ficam persistidos; falhas preservam lotes concluídos e permitem retomada sem repeti-los. Alterações salvas durante um recálculo substituem a operação anterior e iniciam outra para todas as classificações sob as regras novas. Critérios manuais são limitados aos novos pesos, e novo histórico é gravado somente quando o resultado muda. Snapshots anteriores permanecem preservados. A interface informa a atualização e confirma antes de reduzir pesos manuais. Mudanças apenas de nomes/cores e regras de inatividade não recalculam pontuação nem alteram jornadas ativas ou tarefas existentes.
+- O histórico registra a primeira composição e cada mudança de critério, total, completude ou faixa, além do nome e da cor vigentes naquele instante. Recalcular sem mudança não cria outro snapshot; alterar somente nome/cor não cria avaliação histórica.
 - A tela de classificação filtra faixa, responsável, segmento, situação e período de compra; vendedores veem apenas a própria carteira.
 
 ### Demonstração local

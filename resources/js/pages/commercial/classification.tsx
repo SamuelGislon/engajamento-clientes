@@ -13,6 +13,8 @@ type Score = {
     relationship_points: number | null;
     total_score: number | null;
     tier: string | null;
+    tier_name: string | null;
+    tier_color: string | null;
     is_complete: boolean;
 };
 type Company = {
@@ -64,6 +66,8 @@ export default function CommercialClassification({
     filters,
     owners,
     segments,
+    tiers,
+    scoringWeights,
 }: {
     companies: CompanyPage;
     filters: {
@@ -76,6 +80,13 @@ export default function CommercialClassification({
     };
     owners: Option[];
     segments: string[];
+    tiers: { key: string; name: string; color: string }[];
+    scoringWeights: {
+        volume: number;
+        frequency: number;
+        potential: number;
+        relationship: number;
+    };
 }) {
     const form = useForm({
         tier: filters.tier ?? '',
@@ -126,10 +137,11 @@ export default function CommercialClassification({
                         className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                     >
                         <option value="">Todas as faixas</option>
-                        <option value="A">Faixa A</option>
-                        <option value="B">Faixa B</option>
-                        <option value="C">Faixa C</option>
-                        <option value="D">Faixa D</option>
+                        {tiers.map((tier) => (
+                            <option key={tier.key} value={tier.key}>
+                                Faixa {tier.key} — {tier.name}
+                            </option>
+                        ))}
                         <option value="incomplete">Dados incompletos</option>
                     </select>
                     <select
@@ -288,6 +300,14 @@ export default function CommercialClassification({
                                                         company.customer_score
                                                             ?.tier ?? null
                                                     }
+                                                    name={
+                                                        company.customer_score
+                                                            ?.tier_name ?? null
+                                                    }
+                                                    color={
+                                                        company.customer_score
+                                                            ?.tier_color ?? null
+                                                    }
                                                     complete={
                                                         company.customer_score
                                                             ?.is_complete ??
@@ -336,6 +356,7 @@ export default function CommercialClassification({
                                 </summary>
                                 <ScoreBreakdown
                                     score={company.customer_score}
+                                    scoringWeights={scoringWeights}
                                 />
                             </details>
                         ))}
@@ -375,9 +396,13 @@ export default function CommercialClassification({
 
 function TierBadge({
     tier,
+    name,
+    color,
     complete,
 }: {
     tier: string | null;
+    name: string | null;
+    color: string | null;
     complete: boolean;
 }) {
     if (!complete || !tier) {
@@ -389,26 +414,46 @@ function TierBadge({
     }
 
     return (
-        <span className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary">
-            Faixa {tier}
+        <span
+            className="rounded-full px-2.5 py-1 text-xs font-semibold"
+            style={color ? { backgroundColor: `${color}22`, color } : undefined}
+        >
+            {name ?? `Faixa ${tier}`}
         </span>
     );
 }
 
-function ScoreBreakdown({ score }: { score: Score | null }) {
+function ScoreBreakdown({
+    score,
+    scoringWeights,
+}: {
+    score: Score | null;
+    scoringWeights: {
+        volume: number;
+        frequency: number;
+        potential: number;
+        relationship: number;
+    };
+}) {
     return (
         <div className="mt-3 grid gap-2 text-xs text-muted-foreground">
-            <p>Volume em compras: {score?.volume_points ?? 0}/40 pontos</p>
             <p>
-                Frequência em 12 meses: {score?.frequency_points ?? 0}/20 pontos
+                Volume em compras: {score?.volume_points ?? 0}/
+                {scoringWeights.volume} pontos
             </p>
             <p>
-                Potencial comercial: {score?.potential_points ?? 'Pendente'}/20
+                Frequência em 12 meses: {score?.frequency_points ?? 0}/
+                {scoringWeights.frequency} pontos
+            </p>
+            <p>
+                Potencial comercial: {score?.potential_points ?? 'Pendente'}/
+                {scoringWeights.potential}
                 pontos
             </p>
             <p>
                 Acesso e relacionamento:{' '}
-                {score?.relationship_points ?? 'Pendente'}/20 pontos
+                {score?.relationship_points ?? 'Pendente'}/
+                {scoringWeights.relationship} pontos
             </p>
             <p className="pt-1 font-medium text-foreground">
                 {score?.is_complete

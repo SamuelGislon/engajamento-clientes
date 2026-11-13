@@ -46,7 +46,7 @@
 - [x] Importação histórica de vendas com empresa e vendedor autorizados, validação de valores/datas/status, detecção de repetição e recálculo comercial.
 - [ ] Escolhas explícitas de deduplicação e resolução de ambiguidades; processamento assíncrono retomável e controle configurável de jornadas.
 - [ ] Onboarding retomável e templates de adoção.
-- [ ] Configuração explicável de pontuação e inatividade.
+- [ ] Configuração explicável de pontuação e inatividade (pesos, bandas, nomes/cores e limites são editáveis e validados; recálculo em fila com snapshot, retomada e polling, mais apresentação no dashboard, foram implementados; auditoria administrativa central e E2E específico de fila ainda pendentes).
 - [ ] Exportações CSV/XLSX autorizadas e downloads temporários privados.
 - [ ] Auditoria consultável de operações comerciais e administrativas.
 - [ ] Medições reprodutíveis de performance e estrutura para planos/limites sem gateway de pagamento.

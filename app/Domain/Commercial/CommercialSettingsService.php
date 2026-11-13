@@ -12,7 +12,7 @@ class CommercialSettingsService
     {
         app(TenantContext::class)->set($organization);
 
-        return CommercialSetting::query()->firstOrCreate(
+        $settings = CommercialSetting::query()->firstOrCreate(
             ['organization_id' => $organization->id],
             [
                 'sales_inactivity_days' => 90,
@@ -36,12 +36,29 @@ class CommercialSettingsService
                     ['min_purchases' => 4, 'points' => 20],
                 ],
                 'tiers' => [
-                    ['key' => 'D', 'min_score' => 0, 'max_score' => 24, 'color' => '#64748b'],
-                    ['key' => 'C', 'min_score' => 25, 'max_score' => 49, 'color' => '#0ea5e9'],
-                    ['key' => 'B', 'min_score' => 50, 'max_score' => 74, 'color' => '#8b5cf6'],
-                    ['key' => 'A', 'min_score' => 75, 'max_score' => 100, 'color' => '#f59e0b'],
+                    ['key' => 'D', 'name' => 'Acompanhamento espaçado', 'min_score' => 0, 'max_score' => 24, 'color' => '#64748b'],
+                    ['key' => 'C', 'name' => 'Acompanhamento regular', 'min_score' => 25, 'max_score' => 49, 'color' => '#0ea5e9'],
+                    ['key' => 'B', 'name' => 'Prioridade alta', 'min_score' => 50, 'max_score' => 74, 'color' => '#8b5cf6'],
+                    ['key' => 'A', 'name' => 'Estratégica', 'min_score' => 75, 'max_score' => 100, 'color' => '#f59e0b'],
                 ],
             ],
         );
+
+        $defaultNames = [
+            'A' => 'Estratégica',
+            'B' => 'Prioridade alta',
+            'C' => 'Acompanhamento regular',
+            'D' => 'Acompanhamento espaçado',
+        ];
+        $tiers = array_map(static fn (array $tier): array => [
+            'key' => $tier['key'],
+            'name' => $tier['name'] ?? $defaultNames[$tier['key']] ?? 'Faixa '.$tier['key'],
+            'min_score' => $tier['min_score'],
+            'max_score' => $tier['max_score'],
+            'color' => $tier['color'],
+        ], $settings->tiers);
+        $settings->setAttribute('tiers', $tiers);
+
+        return $settings;
     }
 }

@@ -54,6 +54,9 @@ Route::middleware(['auth', 'verified'])->group(function (): void {
         Route::delete('/organization/invitations/{invitation}', [OrganizationInvitationController::class, 'revoke'])->whereNumber('invitation')->name('organization.invitations.revoke');
         Route::get('/commercial-settings', [CommercialSettingsController::class, 'edit'])->name('commercial-settings.edit');
         Route::patch('/commercial-settings', [CommercialSettingsController::class, 'update'])->name('commercial-settings.update');
+        Route::post('/commercial-settings/score-recalculations/{recalculationId}/resume', [CommercialSettingsController::class, 'resumeScoreRecalculation'])
+            ->whereNumber('recalculationId')
+            ->name('commercial-settings.score-recalculations.resume');
         Route::get('/sales', [SaleController::class, 'index'])->name('sales.index');
         Route::get('/commercial/classification', [CustomerScoreController::class, 'index'])->name('commercial.classification.index');
         Route::get('/sales/{sale}/edit', [SaleController::class, 'edit'])->whereNumber('sale')->name('sales.edit');

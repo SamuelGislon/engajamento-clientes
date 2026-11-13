@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Domain\Commercial\CommercialInactivityService;
+use App\Domain\Commercial\CommercialSettingsService;
 use App\Domain\Commercial\CustomerScoreService;
 use App\Domain\Journeys\JourneyService;
 use App\Domain\Sales\SalesMetrics;
@@ -142,6 +143,20 @@ class CompanyController
                 $sale->setAttribute('can_manage', $user->can('update', $sale));
             });
         $scoreHistory = $record->customerScoreHistory()->limit(10)->get();
+        $organization = app(TenantContext::class)->organization();
+        abort_if($organization === null, 404);
+        $commercialSettings = app(CommercialSettingsService::class)->forOrganization($organization);
+        $tierByKey = collect($commercialSettings->tiers)->keyBy('key');
+        if ($record->customerScore !== null) {
+            $tier = $tierByKey->get($record->customerScore->tier);
+            $record->customerScore->setAttribute('tier_name', $tier['name'] ?? null);
+            $record->customerScore->setAttribute('tier_color', $tier['color'] ?? null);
+        }
+        $scoreHistory->each(function ($entry) use ($tierByKey): void {
+            $tier = $tierByKey->get($entry->tier);
+            $entry->setAttribute('tier_name', $entry->tier_name ?? $tier['name'] ?? null);
+            $entry->setAttribute('tier_color', $entry->tier_color ?? $tier['color'] ?? null);
+        });
         $salesTimezone = app(TenantContext::class)->organization()->timezone;
         $role = $user->roleIn(app(TenantContext::class)->id());
         $assignmentHistory = $record->assignmentHistory()
@@ -168,6 +183,7 @@ class CompanyController
             'salesSummary' => app(SalesMetrics::class)->forCompany($record),
             'salesTimezone' => $salesTimezone,
             'customerScore' => $record->customerScore,
+            'scoringWeights' => $commercialSettings->scoring_weights,
             'scoreHistory' => $scoreHistory,
         ]);
     }

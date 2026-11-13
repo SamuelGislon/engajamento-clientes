@@ -2,6 +2,7 @@
 
 namespace App\Domain\Teams;
 
+use App\Domain\Commercial\CommercialSettingsService;
 use App\Models\CommercialAlertOccurrence;
 use App\Models\Company;
 use App\Models\JourneyEnrollment;
@@ -22,6 +23,8 @@ class CommercialReportService
     public function generate(User $user, Organization $organization, array $filters, int $sellerPageSize = 30, bool $includeDetailData = true): array
     {
         $organizationId = $organization->id;
+        $commercialSettings = app(CommercialSettingsService::class)->forOrganization($organization);
+        $tierNames = collect($commercialSettings->tiers)->keyBy('key');
         $timezone = $organization->timezone;
         $nowLocal = CarbonImmutable::now($timezone);
         $fromLocal = CarbonImmutable::parse($filters['from'] ?? $nowLocal->startOfMonth()->toDateString(), $timezone)->startOfDay();
@@ -291,6 +294,12 @@ class CommercialReportService
                 ->paginate($sellerPageSize, ['companies.id', 'companies.name', 'companies.team_id', 'companies.owner_user_id', 'companies.relationship_status'])
                 ->withQueryString()
             : null;
+        $relationshipCompanies?->getCollection()->each(function (Company $company) use ($tierNames): void {
+            if ($company->customerScore !== null) {
+                $tier = $tierNames->get($company->customerScore->tier);
+                $company->customerScore->setAttribute('tier_name', $tier['name'] ?? null);
+            }
+        });
 
         $salesByMonth = [];
         $monthCursor = $fromLocal->startOfMonth();
@@ -336,6 +345,7 @@ class CommercialReportService
                 'unassigned_companies' => $unassignedCompanies,
             ],
             'timezone' => $timezone,
+            'tiers' => $commercialSettings->tiers,
         ];
     }
 

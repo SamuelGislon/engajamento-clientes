@@ -2,6 +2,8 @@
 
 namespace App\Http\Requests;
 
+use App\Domain\Commercial\CommercialSettingsService;
+use App\Domain\Tenancy\TenantContext;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -22,9 +24,13 @@ class UpdateCustomerScoreRequest extends FormRequest
      */
     public function rules(): array
     {
+        $organization = app(TenantContext::class)->organization();
+        abort_if($organization === null, 404);
+        $weights = app(CommercialSettingsService::class)->forOrganization($organization)->scoring_weights;
+
         return [
-            'potential_points' => ['sometimes', 'nullable', 'integer', 'between:0,20'],
-            'relationship_points' => ['sometimes', 'nullable', 'integer', 'between:0,20'],
+            'potential_points' => ['sometimes', 'nullable', 'integer', 'between:0,'.$weights['potential']],
+            'relationship_points' => ['sometimes', 'nullable', 'integer', 'between:0,'.$weights['relationship']],
         ];
     }
 }

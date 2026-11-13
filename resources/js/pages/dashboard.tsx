@@ -18,6 +18,7 @@ import {
     index as companiesIndex,
     show as showCompany,
 } from '@/actions/App/Http/Controllers/CompanyController';
+import { edit as commercialSettingsEdit } from '@/actions/App/Http/Controllers/CommercialSettingsController';
 import DashboardController from '@/actions/App/Http/Controllers/DashboardController';
 import CommercialReportController from '@/actions/App/Http/Controllers/CommercialReportController';
 import { show as showTask } from '@/actions/App/Http/Controllers/TaskController';
@@ -52,6 +53,12 @@ type CommercialMetrics = {
     tier_distribution: Record<'A' | 'B' | 'C' | 'D', number>;
     pending_reactivation_tasks: number;
 };
+type CommercialTierLabel = { name: string; color: string };
+type ScoreRecalculation = {
+    status: 'queued' | 'processing' | 'failed';
+    processed_companies?: number;
+    total_companies?: number;
+};
 type CommercialAttention = {
     id: number;
     type: 'commercial_inactivity' | 'relationship_inactivity';
@@ -60,6 +67,8 @@ type CommercialAttention = {
     company: { id: number; name: string };
     owner: { id: number; name: string } | null;
     tier: string | null;
+    tier_name: string | null;
+    tier_color: string | null;
     last_purchase_at: string | null;
     last_contact_at: string | null;
     suggested_action: string;
@@ -111,6 +120,9 @@ export default function Dashboard({
     recentActivities,
     attentionCompanies,
     commercialMetrics,
+    commercialTierLabels,
+    scoreRecalculation,
+    canManageCommercialSettings,
     commercialAttention,
     commercialTimezone,
     managerReport,
@@ -127,6 +139,9 @@ export default function Dashboard({
     recentActivities: Activity[];
     attentionCompanies: Company[];
     commercialMetrics: CommercialMetrics;
+    commercialTierLabels: Record<'A' | 'B' | 'C' | 'D', CommercialTierLabel>;
+    scoreRecalculation: ScoreRecalculation | null;
+    canManageCommercialSettings: boolean;
     commercialAttention: CommercialAttention[];
     commercialTimezone: string;
     managerReport: {
@@ -325,6 +340,52 @@ export default function Dashboard({
                             interações registradas.
                         </p>
                     </div>
+                    {scoreRecalculation && (
+                        <div
+                            role="status"
+                            className="flex flex-col gap-3 rounded-xl border border-amber-500/40 bg-amber-50 p-4 text-sm text-amber-950 sm:flex-row sm:items-center sm:justify-between dark:bg-amber-950/30 dark:text-amber-100"
+                        >
+                            <div>
+                                <p className="font-semibold">
+                                    {scoreRecalculation.status === 'failed'
+                                        ? 'A atualização da classificação foi interrompida.'
+                                        : 'A classificação comercial está sendo atualizada.'}
+                                </p>
+                                <p className="mt-1">
+                                    {canManageCommercialSettings &&
+                                    scoreRecalculation.processed_companies !==
+                                        undefined &&
+                                    scoreRecalculation.total_companies !==
+                                        undefined ? (
+                                        <>
+                                            {scoreRecalculation.processed_companies.toLocaleString(
+                                                'pt-BR',
+                                            )}{' '}
+                                            de{' '}
+                                            {scoreRecalculation.total_companies.toLocaleString(
+                                                'pt-BR',
+                                            )}{' '}
+                                            empresas processadas. A distribuição
+                                            por faixa fica oculta até a
+                                            atualização terminar.
+                                        </>
+                                    ) : (
+                                        'A distribuição por faixa fica oculta até a atualização terminar.'
+                                    )}
+                                </p>
+                            </div>
+                            {canManageCommercialSettings && (
+                                <Link
+                                    href={commercialSettingsEdit.url()}
+                                    className="font-medium underline underline-offset-4"
+                                >
+                                    {scoreRecalculation.status === 'failed'
+                                        ? 'Retomar em configurações comerciais'
+                                        : 'Ver configurações comerciais'}
+                                </Link>
+                            )}
+                        </div>
+                    )}
                     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                         <Metric
                             label="Clientes com compras"
@@ -388,28 +449,56 @@ export default function Dashboard({
                             detail="Tarefas automáticas abertas"
                             icon={ListTodo}
                         />
-                        <div className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm shadow-black/[0.02] sm:col-span-2 xl:col-span-3">
-                            <p className="text-sm text-muted-foreground">
-                                Distribuição por faixa
-                            </p>
-                            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                                {(['A', 'B', 'C', 'D'] as const).map((tier) => (
-                                    <div
-                                        key={tier}
-                                        className="rounded-xl bg-muted/50 px-4 py-3"
-                                    >
-                                        <p className="text-xs text-muted-foreground">
-                                            Faixa {tier}
-                                        </p>
-                                        <p className="mt-1 text-xl font-semibold">
-                                            {commercialMetrics.tier_distribution[
-                                                tier
-                                            ].toLocaleString('pt-BR')}
-                                        </p>
-                                    </div>
-                                ))}
+                        {scoreRecalculation ? (
+                            <div className="rounded-2xl border border-border/70 bg-muted/30 p-5 sm:col-span-2 xl:col-span-3">
+                                <p className="text-sm text-muted-foreground">
+                                    A distribuição aparecerá quando o recálculo
+                                    for concluído.
+                                </p>
                             </div>
-                        </div>
+                        ) : (
+                            <div className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm shadow-black/[0.02] sm:col-span-2 xl:col-span-3">
+                                <p className="text-sm text-muted-foreground">
+                                    Distribuição por faixa
+                                </p>
+                                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                    {(['A', 'B', 'C', 'D'] as const).map(
+                                        (tier) => (
+                                            <div
+                                                key={tier}
+                                                className="rounded-xl border border-border/70 bg-muted/50 px-4 py-3"
+                                                style={{
+                                                    borderColor:
+                                                        commercialTierLabels[
+                                                            tier
+                                                        ].color,
+                                                }}
+                                            >
+                                                <p
+                                                    className="text-xs font-medium"
+                                                    style={{
+                                                        color: commercialTierLabels[
+                                                            tier
+                                                        ].color,
+                                                    }}
+                                                >
+                                                    {
+                                                        commercialTierLabels[
+                                                            tier
+                                                        ].name
+                                                    }
+                                                </p>
+                                                <p className="mt-1 text-xl font-semibold">
+                                                    {commercialMetrics.tier_distribution[
+                                                        tier
+                                                    ].toLocaleString('pt-BR')}
+                                                </p>
+                                            </div>
+                                        ),
+                                    )}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </section>
 
@@ -444,11 +533,23 @@ export default function Dashboard({
                                             >
                                                 {item.company.name}
                                             </Link>
-                                            {item.tier && (
-                                                <span className="rounded-full bg-muted px-2.5 py-1 text-xs font-medium">
-                                                    Faixa {item.tier}
-                                                </span>
-                                            )}
+                                            {item.tier &&
+                                                scoreRecalculation === null && (
+                                                    <span
+                                                        className="rounded-full border px-2.5 py-1 text-xs font-medium"
+                                                        style={{
+                                                            color:
+                                                                item.tier_color ??
+                                                                undefined,
+                                                            borderColor:
+                                                                item.tier_color ??
+                                                                undefined,
+                                                        }}
+                                                    >
+                                                        {item.tier_name ??
+                                                            `Faixa ${item.tier}`}
+                                                    </span>
+                                                )}
                                             <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-200">
                                                 {item.type ===
                                                 'commercial_inactivity'

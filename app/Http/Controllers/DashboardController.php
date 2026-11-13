@@ -2,10 +2,13 @@
 
 namespace App\Http\Controllers;
 
+use App\Domain\Commercial\CommercialSettingsService;
 use App\Domain\Teams\CommercialReportService;
 use App\Domain\Tenancy\TenantContext;
 use App\Models\Activity;
 use App\Models\CommercialAlertOccurrence;
+use App\Models\CommercialScoreRecalculation;
+use App\Models\CommercialSetting;
 use App\Models\Company;
 use App\Models\Contact;
 use App\Models\CustomerScore;
@@ -22,9 +25,33 @@ class DashboardController
     {
         $user = $request->user();
         $organization = app(TenantContext::class)->organization();
+        abort_if($organization === null, 404);
         $role = $user->roleIn(app(TenantContext::class)->id());
+        $commercialSettings = app(CommercialSettingsService::class)->forOrganization($organization);
+        $commercialTierLabels = collect($commercialSettings->tiers)
+            ->mapWithKeys(fn (array $tier): array => [$tier['key'] => [
+                'name' => $tier['name'] ?? 'Faixa '.$tier['key'],
+                'color' => $tier['color'],
+            ]])
+            ->all();
+        $canManageCommercialSettings = $user->can('manage', CommercialSetting::class);
+        $canViewOrganizationScoreProgress = in_array($role, ['owner', 'admin'], true);
+        $latestScoreRecalculation = CommercialScoreRecalculation::query()
+            ->where('organization_id', $organization->id)
+            ->latest('id')
+            ->first(['id', 'status', 'processed_companies', 'total_companies']);
+        $scoreRecalculation = $latestScoreRecalculation !== null
+            && in_array($latestScoreRecalculation->status, ['queued', 'processing', 'failed'], true)
+            ? array_merge(
+                ['status' => $latestScoreRecalculation->status],
+                $canViewOrganizationScoreProgress ? [
+                    'processed_companies' => $latestScoreRecalculation->processed_companies,
+                    'total_companies' => $latestScoreRecalculation->total_companies,
+                ] : [],
+            )
+            : null;
         $baseCompanies = Company::query()->visibleTo($user);
-        $timezone = app(TenantContext::class)->organization()->timezone;
+        $timezone = $organization->timezone;
         $localTodayStart = now($timezone)->startOfDay();
         $todayStart = $localTodayStart->utc();
         $tomorrowStart = $localTodayStart->addDay()->utc();
@@ -69,8 +96,9 @@ class DashboardController
             ->orderBy('first_detected_at')
             ->limit(8)
             ->get()
-            ->map(function (CommercialAlertOccurrence $occurrence) use ($user): array {
+            ->map(function (CommercialAlertOccurrence $occurrence) use ($user, $commercialTierLabels): array {
                 $company = $occurrence->company;
+                $tier = $company->customerScore?->tier;
 
                 return [
                     'id' => $occurrence->id,
@@ -81,7 +109,9 @@ class DashboardController
                     'owner' => $company->owner === null
                         ? null
                         : ['id' => $company->owner->id, 'name' => $company->owner->name],
-                    'tier' => $company->customerScore?->tier,
+                    'tier' => $tier,
+                    'tier_name' => $tier === null ? null : ($commercialTierLabels[$tier]['name'] ?? 'Faixa '.$tier),
+                    'tier_color' => $tier === null ? null : ($commercialTierLabels[$tier]['color'] ?? null),
                     'last_purchase_at' => $company->last_purchase_at,
                     'last_contact_at' => $company->activities_max_occurred_at,
                     'suggested_action' => $occurrence->task !== null
@@ -110,7 +140,7 @@ class DashboardController
             ->distinct('company_id')
             ->count('company_id');
 
-        $managerReport = $role === 'manager' && $organization !== null
+        $managerReport = $role === 'manager'
             ? app(CommercialReportService::class)->generate($user, $organization, [], 5, false)
             : null;
 
@@ -152,6 +182,9 @@ class DashboardController
                 ],
                 'pending_reactivation_tasks' => (clone $openTasks)->where('type', 'reactivation')->count(),
             ],
+            'commercialTierLabels' => $commercialTierLabels,
+            'scoreRecalculation' => $scoreRecalculation,
+            'canManageCommercialSettings' => $canManageCommercialSettings,
             'commercialAttention' => $commercialAttention,
             'commercialTimezone' => $timezone,
             'managerReport' => $managerReport === null ? null : [

@@ -13,6 +13,7 @@ class CustomerScoreHistory extends Model
     protected $fillable = [
         'company_id', 'volume_points', 'frequency_points', 'potential_points',
         'relationship_points', 'total_score', 'tier', 'is_complete', 'reason', 'recorded_at',
+        'tier_name', 'tier_color',
     ];
 
     protected function casts(): array

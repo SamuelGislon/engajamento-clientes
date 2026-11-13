@@ -13,7 +13,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property array{volume: int, frequency: int, potential: int, relationship: int} $scoring_weights
  * @property list<array{max_amount: numeric-string|null, points: int}> $volume_score_bands
  * @property list<array{min_purchases: int, points: int}> $frequency_score_bands
- * @property list<array{key: string, min_score: int, max_score: int, color: string}> $tiers
+ * @property list<array{key: string, name?: string, min_score: int, max_score: int, color: string}> $tiers
  * @property int|null $post_sale_journey_template_id
  * @property int|null $reactivation_journey_template_id
  */

@@ -1,9 +1,11 @@
 <?php
 
+use App\Domain\Commercial\CommercialSettingsService;
 use App\Domain\Commercial\CustomerScoreService;
 use App\Domain\Tenancy\TenantContext;
 use App\Models\Company;
 use App\Models\Organization;
+use App\Models\Sale;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Inertia\Testing\AssertableInertia;
@@ -98,4 +100,54 @@ it('rejects manual commercial score values above the configured criterion maximu
         ]);
 
     $response->assertSessionHasErrors('potential_points');
+});
+
+it('applies configured volume and frequency points below at and above each band boundary', function () {
+    $organization = Organization::factory()->create();
+    app(TenantContext::class)->set($organization);
+    $settings = app(CommercialSettingsService::class)->forOrganization($organization);
+    $settings->update([
+        'volume_score_bands' => [
+            ['max_amount' => '0.00', 'points' => 0],
+            ['max_amount' => '100.00', 'points' => 10],
+            ['max_amount' => '200.00', 'points' => 20],
+            ['max_amount' => null, 'points' => 40],
+        ],
+    ]);
+    $scoring = app(CustomerScoreService::class);
+
+    foreach ([
+        '0.00' => 0,
+        '0.01' => 10,
+        '99.99' => 10,
+        '100.00' => 10,
+        '100.01' => 20,
+        '199.99' => 20,
+        '200.00' => 20,
+        '200.01' => 40,
+    ] as $amount => $expectedPoints) {
+        $company = Company::factory()->create(['organization_id' => $organization->id]);
+        Sale::factory()->create([
+            'organization_id' => $organization->id,
+            'company_id' => $company->id,
+            'amount' => $amount,
+            'sold_at' => now()->subDay(),
+        ]);
+
+        expect($scoring->recalculateForCompany($company, 'boundary test')->volume_points)
+            ->toBe($expectedPoints);
+    }
+
+    foreach ([0 => 0, 1 => 5, 2 => 10, 3 => 15, 4 => 20, 5 => 20] as $purchaseCount => $expectedPoints) {
+        $company = Company::factory()->create(['organization_id' => $organization->id]);
+        Sale::factory()->count($purchaseCount)->create([
+            'organization_id' => $organization->id,
+            'company_id' => $company->id,
+            'amount' => '0.00',
+            'sold_at' => now()->subDay(),
+        ]);
+
+        expect($scoring->recalculateForCompany($company, 'frequency boundary test')->frequency_points)
+            ->toBe($expectedPoints);
+    }
 });

@@ -3,6 +3,7 @@
 namespace App\Domain\Commercial;
 
 use App\Domain\Tenancy\TenantContext;
+use App\Models\CommercialSetting;
 use App\Models\Company;
 use App\Models\CustomerScore;
 use App\Models\CustomerScoreHistory;
@@ -13,18 +14,44 @@ use Illuminate\Support\Facades\DB;
 
 class CustomerScoreService
 {
-    public function recalculateForCompany(Company $company, string $reason): CustomerScore
-    {
-        return DB::transaction(function () use ($company, $reason): CustomerScore {
+    /**
+     * @param  array{
+     *     scoring_weights: array{volume: int, frequency: int, potential: int, relationship: int},
+     *     volume_score_bands: list<array{max_amount: numeric-string|null, points: int}>,
+     *     frequency_score_bands: list<array{min_purchases: int, points: int}>,
+     *     tiers: list<array{key: string, name?: string, min_score: int, max_score: int, color: string}>
+     * }|null  $settingsSnapshot
+     */
+    public function recalculateForCompany(
+        Company $company,
+        string $reason,
+        bool $respectCurrentWeights = false,
+        ?array $settingsSnapshot = null,
+    ): CustomerScore {
+        return DB::transaction(function () use ($company, $reason, $respectCurrentWeights, $settingsSnapshot): CustomerScore {
             $lockedCompany = Company::query()->lockForUpdate()->findOrFail($company->id);
             $organization = app(TenantContext::class)->organization();
             abort_if($organization === null, 404);
             $settings = app(CommercialSettingsService::class)->forOrganization($organization);
+            $scoringWeights = $settingsSnapshot['scoring_weights'] ?? $settings->scoring_weights;
+            $volumeScoreBands = $settingsSnapshot['volume_score_bands'] ?? $settings->volume_score_bands;
+            $frequencyScoreBands = $settingsSnapshot['frequency_score_bands'] ?? $settings->frequency_score_bands;
+            $tiers = $settingsSnapshot['tiers'] ?? $settings->tiers;
             $score = CustomerScore::query()
                 ->where('company_id', $lockedCompany->id)
                 ->lockForUpdate()
                 ->first();
             $previous = $score === null ? null : $this->snapshot($score);
+
+            if ($respectCurrentWeights && $score !== null) {
+                if ($score->potential_points !== null) {
+                    $score->potential_points = max(0, min($score->potential_points, $scoringWeights['potential']));
+                }
+
+                if ($score->relationship_points !== null) {
+                    $score->relationship_points = max(0, min($score->relationship_points, $scoringWeights['relationship']));
+                }
+            }
 
             $sales = Sale::query()
                 ->where('company_id', $lockedCompany->id)
@@ -32,15 +59,18 @@ class CustomerScoreService
                 ->where('sold_at', '>=', CarbonImmutable::now('UTC')->subYear());
             $volume = $this->numericString((string) $sales->sum('amount'));
             $purchaseCount = (clone $sales)->count();
-            $volumePoints = $this->volumePoints($volume, $settings->volume_score_bands);
-            $frequencyPoints = $this->frequencyPoints($purchaseCount, $settings->frequency_score_bands);
+            $volumePoints = $this->volumePoints($volume, $volumeScoreBands);
+            $frequencyPoints = $this->frequencyPoints($purchaseCount, $frequencyScoreBands);
             $potentialPoints = $score?->potential_points;
             $relationshipPoints = $score?->relationship_points;
             $isComplete = $potentialPoints !== null && $relationshipPoints !== null;
             $totalScore = $isComplete
                 ? $volumePoints + $frequencyPoints + $potentialPoints + $relationshipPoints
                 : null;
-            $tier = $totalScore === null ? null : $this->tierForScore($totalScore, $settings->tiers);
+            $tier = $totalScore === null ? null : $this->tierForScore($totalScore, $tiers);
+            $tierDefinition = $tier === null
+                ? null
+                : collect($tiers)->firstWhere('key', $tier);
 
             $score ??= new CustomerScore(['company_id' => $lockedCompany->id]);
             $score->fill([
@@ -61,6 +91,8 @@ class CustomerScoreService
                 CustomerScoreHistory::query()->create([
                     ...$current,
                     'company_id' => $lockedCompany->id,
+                    'tier_name' => $tierDefinition['name'] ?? null,
+                    'tier_color' => $tierDefinition['color'] ?? null,
                     'reason' => mb_substr($reason, 0, 120),
                     'recorded_at' => CarbonImmutable::now('UTC'),
                 ]);
@@ -74,8 +106,30 @@ class CustomerScoreService
     public function updateManualCriteria(Company $company, array $criteria, string $reason): CustomerScore
     {
         return DB::transaction(function () use ($company, $criteria, $reason): CustomerScore {
+            $organization = app(TenantContext::class)->organization();
+            abort_if($organization === null, 404);
+
+            app(CommercialSettingsService::class)->forOrganization($organization);
+            $settings = CommercialSetting::query()
+                ->where('organization_id', $organization->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+            $lockedCompany = Company::query()
+                ->where('organization_id', $organization->id)
+                ->lockForUpdate()
+                ->findOrFail($company->id);
+
+            foreach ([
+                'potential_points' => 'potential',
+                'relationship_points' => 'relationship',
+            ] as $criterion => $weight) {
+                if (array_key_exists($criterion, $criteria) && $criteria[$criterion] !== null) {
+                    $criteria[$criterion] = max(0, min($criteria[$criterion], $settings->scoring_weights[$weight]));
+                }
+            }
+
             $score = CustomerScore::query()->firstOrCreate(
-                ['company_id' => $company->id],
+                ['company_id' => $lockedCompany->id],
                 [
                     'volume_points' => 0,
                     'frequency_points' => 0,
@@ -89,7 +143,7 @@ class CustomerScoreService
             );
             $score->fill($criteria)->save();
 
-            return $this->recalculateForCompany($company, $reason);
+            return $this->recalculateForCompany($lockedCompany, $reason);
         });
     }
 
