@@ -45,6 +45,7 @@ Route::middleware(['auth', 'verified'])->group(function (): void {
         Route::get('/imports', [DataImportController::class, 'index'])->name('imports.index');
         Route::post('/imports', [DataImportController::class, 'store'])->name('imports.store');
         Route::post('/imports/{dataImport}/mapping', [DataImportController::class, 'saveMapping'])->whereNumber('dataImport')->name('imports.mapping');
+        Route::post('/imports/{dataImport}/resolutions', [DataImportController::class, 'saveResolutions'])->whereNumber('dataImport')->name('imports.resolutions');
         Route::post('/imports/{dataImport}/validate', [DataImportController::class, 'validateImport'])->whereNumber('dataImport')->name('imports.validate');
         Route::post('/imports/{dataImport}/confirm', [DataImportController::class, 'confirm'])->whereNumber('dataImport')->name('imports.confirm');
         Route::post('/imports/{dataImport}/resume', [DataImportController::class, 'resume'])->whereNumber('dataImport')->name('imports.resume');

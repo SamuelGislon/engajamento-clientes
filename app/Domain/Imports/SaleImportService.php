@@ -223,7 +223,7 @@ class SaleImportService
 
     /**
      * @param  list<array{line: int, external_id: string|null, company_id: int, seller_id: int, description: string, amount: string, currency: string, sold_at: string, status: string, notes: string|null}>  $validRows
-     * @return array{createdRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
+     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
      */
     public function import(
         DataImport $batch,
@@ -332,6 +332,7 @@ class SaleImportService
 
         return [
             'createdRows' => $createdRows,
+            'updatedRows' => 0,
             'duplicateRows' => $duplicateRows,
             'invalidRows' => $invalidRows,
             'errors' => $errors,

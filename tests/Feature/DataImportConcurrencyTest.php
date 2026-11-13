@@ -325,3 +325,126 @@ PHP;
         DB::connection()->beginTransaction();
     }
 });
+
+it('rechecks manager access to a duplicate company after a concurrent team membership revocation', function () {
+    if (DB::connection()->getDriverName() !== 'pgsql') {
+        $this->markTestSkipped('Duplicate company access locking is verified against PostgreSQL.');
+    }
+
+    $organization = Organization::factory()->create();
+    $manager = User::factory()->create();
+    $organization->users()->attach($manager, ['role' => 'manager']);
+    app(TenantContext::class)->set($organization);
+    $destinationTeam = Team::query()->create([
+        'name' => 'Equipe importação de destino',
+        'status' => 'active',
+        'created_by' => $manager->id,
+    ]);
+    $companyTeam = Team::query()->create([
+        'name' => 'Equipe da empresa duplicada',
+        'status' => 'active',
+        'created_by' => $manager->id,
+    ]);
+    assignTeamMember($organization, $destinationTeam, $manager, 'manager');
+    assignTeamMember($organization, $companyTeam, $manager, 'manager');
+    $company = Company::factory()->create([
+        'organization_id' => $organization->id,
+        'name' => 'Empresa duplicada de outra equipe',
+        'city' => 'Recife',
+        'state' => 'PE',
+        'tax_id' => null,
+        'phone' => '1111',
+        'team_id' => $companyTeam->id,
+    ]);
+    $batch = DataImport::factory()->create([
+        'organization_id' => $organization->id,
+        'created_by' => $manager->id,
+        'team_id' => $destinationTeam->id,
+        'status' => 'validated',
+    ]);
+    DB::connection()->commit();
+
+    $startedMarker = tempnam(sys_get_temp_dir(), 'company-duplicate-team-lock-');
+    expect($startedMarker)->not->toBeFalse();
+    @unlink($startedMarker);
+    $worker = null;
+
+    try {
+        DB::beginTransaction();
+        Team::query()->lockForUpdate()->findOrFail($companyTeam->id);
+        DB::table('team_memberships')
+            ->where('organization_id', $organization->id)
+            ->where('team_id', $companyTeam->id)
+            ->where('user_id', $manager->id)
+            ->where('role', 'manager')
+            ->update(['is_active' => false, 'updated_at' => now()]);
+
+        $script = <<<'PHP'
+require 'vendor/autoload.php';
+$app = require 'bootstrap/app.php';
+$app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$organization = \App\Models\Organization::query()->findOrFail((int) $argv[1]);
+app(\App\Domain\Tenancy\TenantContext::class)->set($organization);
+file_put_contents($argv[4].'.started', 'started');
+$batch = \App\Models\DataImport::query()->findOrFail((int) $argv[2]);
+$manager = \App\Models\User::query()->findOrFail((int) $argv[3]);
+$company = \App\Models\Company::query()->findOrFail((int) $argv[5]);
+app(\App\Domain\Imports\CompanyImportService::class)->import(
+    $batch,
+    $manager,
+    [[
+        'line' => 2,
+        'attributes' => ['name' => $company->name, 'city' => $company->city, 'state' => $company->state, 'phone' => '2222'],
+        'resolution' => ['action' => 'update', 'target_id' => $company->id],
+    ]],
+    app(\App\Domain\Commercial\CustomerScoreService::class),
+    null,
+    app(\App\Domain\Journeys\JourneyService::class),
+);
+file_put_contents($argv[4].'.done', 'done');
+PHP;
+        $worker = new Process([
+            PHP_BINARY,
+            '-r',
+            $script,
+            (string) $organization->id,
+            (string) $batch->id,
+            (string) $manager->id,
+            $startedMarker,
+            (string) $company->id,
+        ], base_path(), timeout: 30);
+        $worker->start();
+
+        $deadline = microtime(true) + 10;
+        while (microtime(true) < $deadline && ! file_exists($startedMarker.'.started')) {
+            usleep(25_000);
+        }
+
+        expect(file_exists($startedMarker.'.started'))->toBeTrue('The duplicate import worker did not start.');
+        usleep(300_000);
+        expect($worker->isRunning())->toBeTrue('A duplicate update must wait for the target team access lock.');
+        expect(file_exists($startedMarker.'.done'))->toBeFalse();
+
+        DB::connection()->commit();
+        $worker->wait();
+
+        expect($worker->getExitCode())->not->toBe(0)
+            ->and(file_exists($startedMarker.'.done'))->toBeFalse()
+            ->and($company->fresh()->phone)->toBe('1111');
+    } finally {
+        if (DB::transactionLevel() > 0) {
+            DB::rollBack();
+        }
+
+        if ($worker?->isRunning()) {
+            $worker->stop();
+        }
+
+        @unlink($startedMarker);
+        @unlink($startedMarker.'.started');
+        @unlink($startedMarker.'.done');
+        DB::table('organizations')->where('id', $organization->id)->delete();
+        DB::table('users')->where('id', $manager->id)->delete();
+        DB::connection()->beginTransaction();
+    }
+});

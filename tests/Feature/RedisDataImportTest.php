@@ -3,6 +3,7 @@
 use App\Domain\Imports\DataImportProcessor;
 use App\Domain\Tenancy\TenantContext;
 use App\Jobs\ProcessDataImportChunk;
+use App\Models\Company;
 use App\Models\DataImport;
 use App\Models\Organization;
 use App\Models\User;
@@ -48,4 +49,64 @@ it('processes a staged company import through a Redis worker', function (): void
         ->and($batch->refresh()->status)->toBe('completed')
         ->and($batch->processed_rows)->toBe(1)
         ->and($batch->created_rows)->toBe(1);
+});
+
+it('updates a staged visible company duplicate through a Redis worker', function (): void {
+    $organization = Organization::factory()->create();
+    $owner = User::factory()->create();
+    $organization->users()->attach($owner, ['role' => 'owner']);
+    app(TenantContext::class)->set($organization);
+    $company = Company::factory()->create([
+        'organization_id' => $organization->id,
+        'owner_user_id' => $owner->id,
+        'name' => 'Empresa atualizada no worker Redis',
+        'city' => 'Recife',
+        'state' => 'PE',
+        'tax_id' => '12345678000195',
+        'phone' => '1111',
+        'notes' => 'Preservar pelo worker',
+    ]);
+    $batch = DataImport::factory()->create([
+        'organization_id' => $organization->id,
+        'created_by' => $owner->id,
+        'status' => 'queued',
+        'total_rows' => 1,
+        'valid_rows' => 1,
+        'processing_attempts' => 1,
+    ]);
+    app(DataImportProcessor::class)->stageRows($batch, [[
+        'line' => 2,
+        'attributes' => [
+            'name' => $company->name,
+            'city' => $company->city,
+            'state' => $company->state,
+            'tax_id' => $company->tax_id,
+            'phone' => '2222',
+        ],
+        'resolution' => ['action' => 'update', 'target_id' => $company->id],
+    ]]);
+    $queue = 'data-import-'.Str::uuid();
+
+    ProcessDataImportChunk::dispatch($organization->id, $batch->id, 1)->onQueue($queue);
+
+    $exitCode = Artisan::call('queue:work', [
+        'connection' => 'redis',
+        '--once' => true,
+        '--queue' => $queue,
+        '--sleep' => 0,
+        '--tries' => 1,
+    ]);
+
+    expect($exitCode)->toBe(0, Artisan::output())
+        ->and($batch->refresh()->status)->toBe('completed')
+        ->and($batch->processed_rows)->toBe(1)
+        ->and($batch->created_rows)->toBe(0)
+        ->and($batch->updated_rows)->toBe(1);
+
+    $this->assertDatabaseHas('companies', [
+        'id' => $company->id,
+        'phone' => '2222',
+        'owner_user_id' => $owner->id,
+        'notes' => 'Preservar pelo worker',
+    ]);
 });

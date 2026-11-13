@@ -17,12 +17,15 @@ use App\Domain\Journeys\JourneyService;
 use App\Domain\Teams\CommercialAccessScope;
 use App\Domain\Tenancy\TenantContext;
 use App\Http\Requests\SaveDataImportMappingRequest;
+use App\Http\Requests\SaveDataImportResolutionsRequest;
 use App\Http\Requests\StoreDataImportRequest;
 use App\Jobs\ProcessDataImportChunk;
+use App\Models\Company;
 use App\Models\DataImport;
 use App\Models\JourneyTemplate;
 use App\Models\Organization;
 use App\Models\Team;
+use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -130,10 +133,13 @@ class DataImportController extends Controller
         return redirect()->route('imports.index')->with('success', 'Arquivo recebido. Revise os dados antes de confirmar a importação.');
     }
 
-    public function show(int $dataImport, SpreadsheetPreviewReader $previewReader): Response
+    public function show(Request $request, int $dataImport, SpreadsheetPreviewReader $previewReader): Response
     {
         $record = DataImport::query()->findOrFail($dataImport);
         Gate::authorize('view', $record);
+
+        $validationErrors = $this->visibleValidationErrors($record, $request->user());
+        $duplicateResolutions = $this->visibleDuplicateResolutions($record, $validationErrors);
 
         $organizationId = app(TenantContext::class)->id();
         $expectedPathPrefix = 'imports/'.$organizationId.'/';
@@ -162,7 +168,8 @@ class DataImportController extends Controller
                 'journey_mode' => $record->journey_mode,
                 'journey_template' => $record->journeyTemplate?->only(['id', 'name']),
                 'mapping' => $record->mapping,
-                'validation_errors' => $record->validation_errors ?? [],
+                'validation_errors' => $validationErrors,
+                'duplicate_resolutions' => $duplicateResolutions,
                 'total_rows' => $record->total_rows,
                 'valid_rows' => $record->valid_rows,
                 'processed_rows' => $record->processed_rows,
@@ -241,6 +248,7 @@ class DataImportController extends Controller
             'mapping' => $normalizedMapping,
             'status' => 'mapped',
             'validation_errors' => null,
+            'duplicate_resolutions' => null,
             'total_rows' => 0,
             'valid_rows' => 0,
             'invalid_rows' => 0,
@@ -282,6 +290,74 @@ class DataImportController extends Controller
         return redirect()->route('imports.show', $record->id)->with('success', 'Mapeamento salvo para este lote.');
     }
 
+    public function saveResolutions(SaveDataImportResolutionsRequest $request, int $dataImport): RedirectResponse
+    {
+        $record = DataImport::query()->findOrFail($dataImport);
+        Gate::authorize('update', $record);
+        $requestedResolutions = $request->validated('resolutions');
+
+        DB::transaction(function () use ($request, $record, $requestedResolutions): void {
+            $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
+            Gate::forUser($request->user())->authorize('update', $batch);
+
+            if ($batch->status !== 'validated' || $batch->record_type !== 'companies') {
+                throw ValidationException::withMessages(['resolutions' => 'As decisões de duplicidade não podem mais ser alteradas neste lote.']);
+            }
+
+            $duplicateErrors = collect($batch->validation_errors ?? [])
+                ->filter(fn (array $error): bool => $error['type'] === 'duplicate')
+                ->keyBy(fn (array $error): string => (string) $error['line']);
+            $resolutions = [];
+
+            foreach ($requestedResolutions as $line => $resolution) {
+                $error = $duplicateErrors->get((string) $line);
+
+                if ($error === null) {
+                    throw ValidationException::withMessages(['resolutions' => 'Uma das linhas selecionadas não está mais marcada como duplicada. Valide o arquivo novamente.']);
+                }
+
+                $action = $resolution['action'];
+                $candidates = is_array($error['candidates'] ?? null) ? $error['candidates'] : [];
+                $targetId = isset($resolution['target_id']) ? (int) $resolution['target_id'] : null;
+
+                if ($action === 'create' && ($error['can_create'] ?? false) !== true) {
+                    throw ValidationException::withMessages(['resolutions' => 'Esta linha possui um identificador único já utilizado e não pode criar outro registro.']);
+                }
+
+                if ($action === 'update') {
+                    if (count($candidates) !== 1) {
+                        throw ValidationException::withMessages(['resolutions' => 'Atualização direta exige exatamente um registro correspondente. Escolha a resolução manual.']);
+                    }
+
+                    $targetId = (int) $candidates[0]['id'];
+                }
+
+                if ($action === 'resolve' && ! in_array($targetId, array_map(
+                    static fn (array $candidate): int => (int) $candidate['id'],
+                    $candidates,
+                ), true)) {
+                    throw ValidationException::withMessages(['resolutions' => 'Selecione um registro correspondente visível para resolver a ambiguidade.']);
+                }
+
+                $resolutions[(string) $line] = [
+                    'action' => $action,
+                    ...(in_array($action, ['update', 'resolve'], true) && $targetId !== null ? ['target_id' => $targetId] : []),
+                ];
+            }
+
+            $batch->rows()->delete();
+            $batch->update([
+                'status' => 'mapped',
+                'duplicate_resolutions' => array_replace($batch->duplicate_resolutions ?? [], $resolutions),
+                'valid_rows' => 0,
+                'duplicate_rows' => 0,
+                'skipped_rows' => 0,
+            ]);
+        });
+
+        return redirect()->route('imports.show', $record->id)->with('success', 'Decisões salvas. Valide novamente para revisar o resultado antes de confirmar.');
+    }
+
     public function validateImport(
         Request $request,
         int $dataImport,
@@ -316,6 +392,8 @@ class DataImportController extends Controller
             default => abort(422),
         };
 
+        $analyzedMapping = $record->mapping;
+        $analyzedDuplicateResolutions = $record->duplicate_resolutions;
         $analysis = $importService->analyze(
             $record,
             $request->user(),
@@ -325,12 +403,16 @@ class DataImportController extends Controller
             $preview['malformedRows'],
         );
 
-        DB::transaction(function () use ($request, $record, $analysis): void {
+        DB::transaction(function () use ($request, $record, $analysis, $analyzedMapping, $analyzedDuplicateResolutions): void {
             $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
             Gate::forUser($request->user())->authorize('update', $batch);
 
             if (in_array($batch->status, ['completed', 'expired', 'queued', 'processing'], true)) {
                 throw ValidationException::withMessages(['file' => 'Este lote não pode mais ser validado.']);
+            }
+
+            if ($batch->mapping !== $analyzedMapping || $batch->duplicate_resolutions !== $analyzedDuplicateResolutions) {
+                throw ValidationException::withMessages(['file' => 'O mapeamento ou as decisões de duplicidade mudaram durante a validação. Valide o lote novamente.']);
             }
 
             $this->preventResettingPartialImport($batch, 'file');
@@ -468,6 +550,7 @@ class DataImportController extends Controller
             }
 
             $createdRows = 0;
+            $updatedRows = 0;
             $raceDuplicates = 0;
             $raceInvalidRows = 0;
 
@@ -482,6 +565,7 @@ class DataImportController extends Controller
                 );
                 $importResult = $contactImports->import($batch, $request->user(), $analysis['validRows']);
                 $createdRows = $importResult['createdRows'];
+                $updatedRows = $importResult['updatedRows'];
                 $raceDuplicates = $importResult['duplicateRows'];
                 $raceInvalidRows = $importResult['invalidRows'];
                 $analysis['errors'] = array_merge($analysis['errors'], $importResult['errors']);
@@ -496,6 +580,7 @@ class DataImportController extends Controller
                 );
                 $importResult = $saleImports->import($batch, $request->user(), $analysis['validRows'], $scores, $inactivity, $journeys);
                 $createdRows = $importResult['createdRows'];
+                $updatedRows = $importResult['updatedRows'];
                 $raceDuplicates = $importResult['duplicateRows'];
                 $raceInvalidRows = $importResult['invalidRows'];
                 $analysis['errors'] = array_merge($analysis['errors'], $importResult['errors']);
@@ -520,6 +605,7 @@ class DataImportController extends Controller
                     $journeys,
                 );
                 $createdRows = $importResult['createdRows'];
+                $updatedRows = $importResult['updatedRows'];
                 $raceDuplicates = $importResult['duplicateRows'];
                 $raceInvalidRows = $importResult['invalidRows'];
                 $analysis['errors'] = array_merge($analysis['errors'], $importResult['errors']);
@@ -535,7 +621,7 @@ class DataImportController extends Controller
                 'invalid_rows' => $invalidRows,
                 'duplicate_rows' => $duplicateRows,
                 'created_rows' => $createdRows,
-                'updated_rows' => 0,
+                'updated_rows' => $updatedRows,
                 'skipped_rows' => $invalidRows + $duplicateRows,
                 'validation_errors' => $analysis['errors'],
                 'last_error' => null,
@@ -645,5 +731,106 @@ class DataImportController extends Controller
                 $field => 'Este lote já gravou registros. Retome as linhas pendentes para evitar repetir dados já importados.',
             ]);
         }
+    }
+
+    /** @return list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}> */
+    private function visibleValidationErrors(DataImport $record, User $actor): array
+    {
+        $errors = $record->validation_errors ?? [];
+
+        if ($record->record_type !== 'companies') {
+            return $errors;
+        }
+
+        $candidateIds = collect($errors)
+            ->flatMap(fn (array $error): array => is_array($error['candidates'] ?? null)
+                ? array_map(static fn (array $candidate): int => (int) $candidate['id'], $error['candidates'])
+                : [])
+            ->unique()
+            ->values()
+            ->all();
+        $visibleCompanies = Company::query()
+            ->where('organization_id', $record->organization_id)
+            ->visibleTo($actor)
+            ->whereKey($candidateIds)
+            ->get(['id', 'name', 'city', 'state', 'tax_id'])
+            ->keyBy('id');
+
+        return array_map(function (array $error) use ($visibleCompanies): array {
+            if ($error['type'] !== 'duplicate' || ! isset($error['candidates'])) {
+                return $error;
+            }
+
+            $visibleCandidates = [];
+
+            foreach ($error['candidates'] as $candidate) {
+                $company = $visibleCompanies->get($candidate['id']);
+
+                if ($company instanceof Company) {
+                    $visibleCandidates[] = [
+                        'id' => $company->id,
+                        'name' => $company->name,
+                        'city' => $company->city,
+                        'state' => $company->state,
+                        'tax_id_masked' => $this->maskTaxId($company->tax_id),
+                    ];
+                }
+            }
+
+            $error['candidates'] = $visibleCandidates;
+
+            return $error;
+        }, $errors);
+    }
+
+    /**
+     * @param  list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}>  $validationErrors
+     * @return array<int|string, array{action: string, target_id?: int}>
+     */
+    private function visibleDuplicateResolutions(DataImport $record, array $validationErrors): array
+    {
+        $storedResolutions = $record->duplicate_resolutions ?? [];
+        $visibleResolutions = [];
+
+        foreach ($validationErrors as $error) {
+            if ($error['type'] !== 'duplicate') {
+                continue;
+            }
+
+            $line = (string) $error['line'];
+            $resolution = $storedResolutions[$error['line']] ?? null;
+
+            if ($resolution === null) {
+                continue;
+            }
+
+            $targetId = $resolution['target_id'] ?? null;
+            $visibleCandidateIds = array_map(
+                static fn (array $candidate): int => (int) $candidate['id'],
+                $error['candidates'] ?? [],
+            );
+
+            if (is_int($targetId) && ! in_array($targetId, $visibleCandidateIds, true)) {
+                continue;
+            }
+
+            $visibleResolutions[$line] = [
+                'action' => $resolution['action'],
+                ...(is_int($targetId) ? ['target_id' => $targetId] : []),
+            ];
+        }
+
+        return $visibleResolutions;
+    }
+
+    private function maskTaxId(?string $taxId): ?string
+    {
+        $digits = preg_replace('/\D+/', '', $taxId ?? '') ?? '';
+
+        if (strlen($digits) !== 14) {
+            return null;
+        }
+
+        return substr($digits, 0, 2).'.***.***/****-'.substr($digits, -2);
     }
 }

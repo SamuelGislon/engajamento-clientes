@@ -43,6 +43,48 @@ test('owner imports a CSV company after mapping and reviewing validation', async
     ).toBeVisible();
 });
 
+test('owner explicitly updates one visible company duplicate', async ({
+    page,
+}) => {
+    await signIn(page, 'owner@example.test');
+    await page.goto('/imports');
+    await page.getByLabel('Arquivo CSV ou Excel').setInputFiles({
+        name: 'company-update.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from(
+            'Name,City,State,Phone\nEscritório Horizonte,São Paulo,SP,5555\n',
+        ),
+    });
+    await page.getByRole('button', { name: 'Enviar para prévia' }).click();
+    await page.getByRole('link', { name: 'company-update.csv' }).click();
+    await page.getByLabel('Nome da empresa').selectOption('0');
+    await page.getByLabel('Cidade').selectOption('1');
+    await page.getByLabel('UF').selectOption('2');
+    await page.getByLabel('Telefone').selectOption('3');
+    await page.getByRole('button', { name: 'Salvar mapeamento' }).click();
+    await page.getByRole('button', { name: 'Validar todas as linhas' }).click();
+
+    await expect(
+        page.getByRole('heading', {
+            name: 'Decisões para empresas duplicadas',
+        }),
+    ).toBeVisible();
+    await expect(page.getByText(/Registro #\d+/)).toBeVisible();
+    await page.getByLabel('Ação', { exact: true }).selectOption('update');
+    await page
+        .getByRole('button', { name: 'Salvar decisões e revalidar' })
+        .click();
+    await expect(
+        page.getByRole('button', { name: 'Confirmar importação' }),
+    ).toBeEnabled();
+
+    await page.getByRole('button', { name: 'Confirmar importação' }).click();
+    await expect(
+        page.getByRole('heading', { name: 'Resultado da importação' }),
+    ).toBeVisible();
+    await expect(page.getByText('Atualizadas')).toBeVisible();
+});
+
 test('owner can choose the default journey for imported eligible prospects', async ({
     page,
 }) => {

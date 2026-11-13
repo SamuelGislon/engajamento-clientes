@@ -16,7 +16,7 @@ use JsonException;
 use RuntimeException;
 
 /**
- * @phpstan-type CompanyImportRow array{line: int, attributes: array<string, mixed>}
+ * @phpstan-type CompanyImportRow array{line: int, attributes: array<string, mixed>, resolution?: array{action: string, target_id?: int}}
  * @phpstan-type ContactImportRow array{line: int, identity: string, attributes: array<string, mixed>, company_id: int, roles: list<string>, is_primary: bool, relationship_notes: string|null}
  * @phpstan-type SaleImportRow array{line: int, external_id: string|null, company_id: int, seller_id: int, description: string, amount: string, currency: string, sold_at: string, status: string, notes: string|null}
  */
@@ -109,7 +109,7 @@ class DataImportProcessor
 
     /**
      * @param  EloquentCollection<int, DataImportRow>  $stagedRows
-     * @return array{createdRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
+     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
      */
     public function importRows(
         DataImport $batch,
@@ -144,6 +144,28 @@ class DataImportProcessor
                 throw new RuntimeException('The staged company import row is invalid.');
             }
 
+            $resolution = null;
+            $rawResolution = $row['resolution'] ?? null;
+            if ($rawResolution !== null) {
+                if (! is_array($rawResolution)) {
+                    throw new RuntimeException('The staged company import resolution is invalid.');
+                }
+
+                $action = $rawResolution['action'] ?? null;
+                $targetId = $rawResolution['target_id'] ?? null;
+
+                if (! is_string($action)
+                    || ! in_array($action, ['create', 'update', 'resolve'], true)
+                    || ($targetId !== null && ! is_int($targetId))) {
+                    throw new RuntimeException('The staged company import resolution is invalid.');
+                }
+
+                $resolution = [
+                    'action' => $action,
+                    ...(is_int($targetId) ? ['target_id' => $targetId] : []),
+                ];
+            }
+
             $attributes = [];
             foreach ($row['attributes'] as $key => $value) {
                 if (! is_string($key)) {
@@ -153,7 +175,11 @@ class DataImportProcessor
                 $attributes[$key] = $value;
             }
 
-            $validRows[] = ['line' => $row['line'], 'attributes' => $attributes];
+            $validRows[] = [
+                'line' => $row['line'],
+                'attributes' => $attributes,
+                ...($resolution !== null ? ['resolution' => $resolution] : []),
+            ];
         }
 
         return $validRows;

@@ -227,7 +227,7 @@ class ContactImportService
 
     /**
      * @param  list<array{line: int, identity: string, attributes: array<string, mixed>, company_id: int, roles: list<string>, is_primary: bool, relationship_notes: string|null}>  $validRows
-     * @return array{createdRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
+     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
      */
     public function import(DataImport $batch, User $actor, array $validRows): array
     {
@@ -318,7 +318,7 @@ class ContactImportService
             }
         }
 
-        return ['createdRows' => $createdRows, 'duplicateRows' => $duplicateRows, 'invalidRows' => $invalidRows, 'errors' => $errors];
+        return ['createdRows' => $createdRows, 'updatedRows' => 0, 'duplicateRows' => $duplicateRows, 'invalidRows' => $invalidRows, 'errors' => $errors];
     }
 
     private function assertDestinationStillAuthorized(DataImport $batch, User $actor, bool $lockDestination): void

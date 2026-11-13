@@ -159,6 +159,7 @@ class ProcessDataImportChunk implements ShouldQueue
 
                 $batch->increment('processed_rows', $processedRows);
                 $batch->increment('created_rows', $importResult['createdRows']);
+                $batch->increment('updated_rows', $importResult['updatedRows']);
                 $batch->increment('duplicate_rows', $importResult['duplicateRows']);
                 $batch->increment('invalid_rows', $importResult['invalidRows']);
                 $batch->increment('skipped_rows', $importResult['duplicateRows'] + $importResult['invalidRows']);

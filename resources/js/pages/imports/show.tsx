@@ -9,6 +9,7 @@ import {
     confirm as confirmDataImport,
     index as importsIndex,
     saveMapping as saveImportMapping,
+    saveResolutions as saveImportResolutions,
     validateImport as validateDataImport,
     resume as resumeDataImport,
 } from '@/actions/App/Http/Controllers/DataImportController';
@@ -43,9 +44,28 @@ type ImportRecord = {
     created_rows: number;
     updated_rows: number;
     skipped_rows: number;
-    validation_errors: { line: number; type: string; message: string }[];
+    validation_errors: ImportValidationError[];
+    duplicate_resolutions: Record<
+        string,
+        { action: string; target_id?: number }
+    >;
     team: { id: number; name: string } | null;
     expires_at: string;
+};
+
+type DuplicateCandidate = {
+    id: number;
+    name: string;
+    city: string | null;
+    state: string | null;
+    tax_id_masked: string | null;
+};
+type ImportValidationError = {
+    line: number;
+    type: string;
+    message: string;
+    candidates?: DuplicateCandidate[];
+    can_create?: boolean;
 };
 
 type FieldOption = { label: string; required: boolean };
@@ -86,6 +106,28 @@ export default function ImportShow({
             : '',
     });
     const actionForm = useForm({});
+    const resolutionForm = useForm<{
+        resolutions: Record<string, { action: string; target_id?: string }>;
+    }>({
+        resolutions: Object.fromEntries(
+            importRecord.validation_errors
+                .filter((error) => error.type === 'duplicate')
+                .map((error) => {
+                    const saved =
+                        importRecord.duplicate_resolutions[String(error.line)];
+
+                    return [
+                        String(error.line),
+                        {
+                            action: saved?.action ?? 'ignore',
+                            ...(saved?.target_id !== undefined
+                                ? { target_id: String(saved.target_id) }
+                                : {}),
+                        },
+                    ];
+                }),
+        ),
+    });
     const isQueueActive =
         importRecord.status === 'queued' ||
         importRecord.status === 'processing';
@@ -106,6 +148,12 @@ export default function ImportShow({
     const actionErrors = Object.values(actionForm.errors).filter(
         (message): message is string => typeof message === 'string',
     );
+    const resolutionErrors = Object.values(resolutionForm.errors).filter(
+        (message): message is string => typeof message === 'string',
+    );
+    const duplicateErrors = importRecord.validation_errors.filter(
+        (error) => error.type === 'duplicate',
+    );
 
     function saveMapping(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -119,6 +167,28 @@ export default function ImportShow({
             validateDataImport.url({ dataImport: importRecord.id }),
             { preserveScroll: true },
         );
+    }
+
+    function saveDuplicateResolutions() {
+        resolutionForm.post(
+            saveImportResolutions.url({ dataImport: importRecord.id }),
+            {
+                preserveScroll: true,
+                onSuccess: () => validateRows(),
+            },
+        );
+    }
+
+    function setResolution(line: number, action: string, targetId?: number) {
+        resolutionForm.setData('resolutions', {
+            ...resolutionForm.data.resolutions,
+            [String(line)]: {
+                action,
+                ...(targetId !== undefined
+                    ? { target_id: String(targetId) }
+                    : {}),
+            },
+        });
     }
 
     function confirmRows() {
@@ -614,10 +684,11 @@ export default function ImportShow({
                         <p className="mt-1 text-sm text-muted-foreground">
                             A validação lê todas as linhas, identifica erros e
                             duplicidades reconhecíveis pelas regras de cada
-                            tipo. Linhas duplicadas ou inválidas serão
-                            ignoradas; os registros existentes não serão
-                            alterados. Vendas sem identificador externo são
-                            tratadas como transações distintas.
+                            tipo. Sem uma decisão explícita, duplicatas serão
+                            ignoradas. Para empresas, você pode escolher criar,
+                            atualizar um único correspondente ou resolver uma
+                            ambiguidade manualmente. Vendas sem identificador
+                            externo são tratadas como transações distintas.
                         </p>
                         <div className="mt-5 grid gap-3 sm:grid-cols-4">
                             <Summary
@@ -640,7 +711,7 @@ export default function ImportShow({
                         {importRecord.validation_errors.length > 0 && (
                             <div className="mt-5 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
                                 <h3 className="font-medium">
-                                    Linhas que serão ignoradas
+                                    Linhas com avisos ou problemas
                                 </h3>
                                 <ul className="mt-2 grid gap-1 text-sm text-muted-foreground">
                                     {importRecord.validation_errors.map(
@@ -660,6 +731,210 @@ export default function ImportShow({
                                 )}
                             </div>
                         )}
+                        {importRecord.record_type === 'companies' &&
+                            duplicateErrors.length > 0 && (
+                                <div className="mt-5 rounded-xl border border-border/70 p-4">
+                                    <h3 className="font-medium">
+                                        Decisões para empresas duplicadas
+                                    </h3>
+                                    <p className="mt-1 text-sm text-muted-foreground">
+                                        Escolha uma ação para cada linha.
+                                        Atualizações alteram apenas campos
+                                        preenchidos no mapeamento e preservam
+                                        proprietário, equipe e campos não
+                                        enviados.
+                                    </p>
+                                    <div className="mt-4 grid gap-3">
+                                        {duplicateErrors.map((error) => {
+                                            const key = String(error.line);
+                                            const resolution = resolutionForm
+                                                .data.resolutions[key] ?? {
+                                                action: 'ignore',
+                                            };
+                                            const candidates =
+                                                error.candidates ?? [];
+
+                                            return (
+                                                <div
+                                                    key={error.line}
+                                                    className="grid gap-3 rounded-lg border border-border/60 p-3 md:grid-cols-[minmax(0,1fr)_minmax(14rem,0.7fr)]"
+                                                >
+                                                    <div>
+                                                        <p className="text-sm font-medium">
+                                                            Linha {error.line}
+                                                        </p>
+                                                        <p className="mt-1 text-sm text-muted-foreground">
+                                                            {candidates.length >
+                                                            0
+                                                                ? candidates
+                                                                      .map(
+                                                                          (
+                                                                              candidate,
+                                                                          ) =>
+                                                                              [
+                                                                                  candidate.name,
+                                                                                  candidate.city,
+                                                                                  candidate.state,
+                                                                                  `Registro #${candidate.id}`,
+                                                                                  candidate.tax_id_masked
+                                                                                      ? `CNPJ ${candidate.tax_id_masked}`
+                                                                                      : null,
+                                                                              ]
+                                                                                  .filter(
+                                                                                      Boolean,
+                                                                                  )
+                                                                                  .join(
+                                                                                      ' · ',
+                                                                                  ),
+                                                                      )
+                                                                      .join(
+                                                                          ' / ',
+                                                                      )
+                                                                : 'A linha repete uma empresa do próprio arquivo.'}
+                                                        </p>
+                                                    </div>
+                                                    <div className="grid gap-2">
+                                                        <Label
+                                                            htmlFor={`resolution-${error.line}`}
+                                                        >
+                                                            Ação
+                                                        </Label>
+                                                        <select
+                                                            id={`resolution-${error.line}`}
+                                                            value={
+                                                                resolution.action
+                                                            }
+                                                            onChange={(event) =>
+                                                                setResolution(
+                                                                    error.line,
+                                                                    event.target
+                                                                        .value,
+                                                                )
+                                                            }
+                                                            className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                                                        >
+                                                            <option value="ignore">
+                                                                Ignorar linha
+                                                            </option>
+                                                            {error.can_create && (
+                                                                <option value="create">
+                                                                    Criar
+                                                                    registro
+                                                                </option>
+                                                            )}
+                                                            {candidates.length ===
+                                                                1 && (
+                                                                <option value="update">
+                                                                    Atualizar
+                                                                    registro
+                                                                    correspondente
+                                                                </option>
+                                                            )}
+                                                            {candidates.length >
+                                                                1 && (
+                                                                <option value="resolve">
+                                                                    Resolver
+                                                                    manualmente
+                                                                </option>
+                                                            )}
+                                                        </select>
+                                                        {resolution.action ===
+                                                            'resolve' && (
+                                                            <select
+                                                                aria-label={`Empresa de destino da linha ${error.line}`}
+                                                                value={
+                                                                    resolution.target_id ??
+                                                                    ''
+                                                                }
+                                                                onChange={(
+                                                                    event,
+                                                                ) =>
+                                                                    setResolution(
+                                                                        error.line,
+                                                                        'resolve',
+                                                                        event
+                                                                            .target
+                                                                            .value ===
+                                                                            ''
+                                                                            ? undefined
+                                                                            : Number(
+                                                                                  event
+                                                                                      .target
+                                                                                      .value,
+                                                                              ),
+                                                                    )
+                                                                }
+                                                                className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                                                            >
+                                                                <option value="">
+                                                                    Selecione a
+                                                                    empresa
+                                                                </option>
+                                                                {candidates.map(
+                                                                    (
+                                                                        candidate,
+                                                                    ) => (
+                                                                        <option
+                                                                            key={
+                                                                                candidate.id
+                                                                            }
+                                                                            value={
+                                                                                candidate.id
+                                                                            }
+                                                                        >
+                                                                            {
+                                                                                candidate.name
+                                                                            }
+                                                                            {` · Registro #${candidate.id}`}
+                                                                            {candidate.city
+                                                                                ? ` · ${candidate.city}`
+                                                                                : ''}
+                                                                            {candidate.state
+                                                                                ? `/${candidate.state}`
+                                                                                : ''}
+                                                                            {candidate.tax_id_masked
+                                                                                ? ` · CNPJ ${candidate.tax_id_masked}`
+                                                                                : ''}
+                                                                        </option>
+                                                                    ),
+                                                                )}
+                                                            </select>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    {resolutionErrors.length > 0 && (
+                                        <div
+                                            role="alert"
+                                            className="mt-4 text-sm text-destructive"
+                                        >
+                                            {resolutionErrors.map(
+                                                (message, index) => (
+                                                    <p
+                                                        key={`${message}-${index}`}
+                                                    >
+                                                        {message}
+                                                    </p>
+                                                ),
+                                            )}
+                                        </div>
+                                    )}
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        className="mt-4"
+                                        onClick={saveDuplicateResolutions}
+                                        disabled={
+                                            resolutionForm.processing ||
+                                            actionForm.processing
+                                        }
+                                    >
+                                        Salvar decisões e revalidar
+                                    </Button>
+                                </div>
+                            )}
                         {actionErrors.length > 0 && (
                             <div
                                 role="alert"

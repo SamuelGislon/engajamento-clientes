@@ -21,10 +21,10 @@ class CompanyImportService
      * @param  list<int>  $malformedRows
      * @return array{
      *     totalRows: int,
-     *     validRows: list<array{line: int, attributes: array<string, mixed>}>,
+     *     validRows: list<array{line: int, attributes: array<string, mixed>, resolution?: array{action: string, target_id?: int}}>,
      *     invalidRows: int,
      *     duplicateRows: int,
-     *     errors: list<array{line: int, type: string, message: string}>
+     *     errors: list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}>
      * }
      */
     public function analyze(DataImport $batch, User $actor, array $rows, int $totalRows, bool $lockDestination = false, array $malformedRows = []): array
@@ -104,23 +104,38 @@ class CompanyImportService
 
         $existingKeys = $this->existingIdentityKeys($batch, $actor, $candidates);
         $seenKeys = [];
+        $seenTaxIds = [];
         $validRows = [];
         $duplicateRows = 0;
 
         foreach ($candidates as $candidate) {
             $isDuplicate = false;
             $isOutsidePortfolio = false;
+            $taxIdSeenInFile = false;
+            $matchingCompanies = [];
 
             foreach ($candidate['keys'] as $key) {
                 if (isset($existingKeys['hidden'][$key])) {
                     $isOutsidePortfolio = true;
-                } elseif (isset($existingKeys['visible'][$key]) || isset($seenKeys[$key])) {
+                } elseif (isset($existingKeys['visible'][$key])) {
                     $isDuplicate = true;
+                    foreach ($existingKeys['candidatesByKey'][$key] ?? [] as $company) {
+                        $matchingCompanies[$company['id']] = $company;
+                    }
+                } elseif (isset($seenKeys[$key])) {
+                    $isDuplicate = true;
+                    $taxIdSeenInFile = $taxIdSeenInFile || str_starts_with($key, 'cnpj:');
                 }
             }
 
             foreach ($candidate['keys'] as $key) {
                 $seenKeys[$key] = true;
+            }
+
+            $taxId = $candidate['attributes']['tax_id'] ?? null;
+            if (is_string($taxId) && $taxId !== '') {
+                $taxIdSeenInFile = $taxIdSeenInFile || isset($seenTaxIds[$taxId]);
+                $seenTaxIds[$taxId] = true;
             }
 
             if ($isOutsidePortfolio) {
@@ -131,23 +146,78 @@ class CompanyImportService
             }
 
             if ($isDuplicate) {
-                $duplicateRows++;
-                $this->appendError($errors, $candidate['line'], 'duplicate', 'Possível duplicidade identificada; a linha será ignorada.');
+                $resolution = $this->requestedResolution($batch, $candidate['line']);
+                $targetId = $this->resolvedTargetId($resolution, $matchingCompanies);
+                $canCreate = ! $taxIdSeenInFile && ! $this->hasTaxIdMatch($candidate['attributes'], $matchingCompanies);
 
-                continue;
+                if (($resolution['action'] ?? null) === 'ignore') {
+                    $duplicateRows++;
+
+                    continue;
+                }
+
+                if ($resolution === null
+                    || ! in_array($resolution['action'], ['create', 'update', 'resolve', 'ignore'], true)
+                    || ($resolution['action'] === 'create' && ! $canCreate)
+                    || (in_array($resolution['action'], ['update', 'resolve'], true) && $targetId === null)) {
+                    $duplicateRows++;
+                    $this->appendError(
+                        $errors,
+                        $candidate['line'],
+                        'duplicate',
+                        'Possível duplicidade identificada. Escolha criar, atualizar um registro visível, resolver manualmente ou ignorar a linha.',
+                        [
+                            'candidates' => array_map(
+                                fn (array $company): array => [
+                                    'id' => $company['id'],
+                                    'name' => $company['name'],
+                                    'city' => $company['city'],
+                                    'state' => $company['state'],
+                                    'tax_id_masked' => $this->maskTaxId($company['tax_id']),
+                                ],
+                                array_values($matchingCompanies),
+                            ),
+                            'can_create' => $canCreate,
+                        ],
+                    );
+
+                    continue;
+                }
+
+                if ($resolution['action'] === 'create') {
+                    $candidate['resolution'] = ['action' => 'create'];
+                } elseif ($targetId !== null) {
+                    $candidate['resolution'] = [
+                        'action' => $resolution['action'],
+                        'target_id' => $targetId,
+                    ];
+                } else {
+                    $duplicateRows++;
+                    $this->appendError($errors, $candidate['line'], 'duplicate', 'A resolução salva não corresponde mais a um registro acessível. Revise a linha antes de continuar.');
+
+                    continue;
+                }
             }
 
             $attributes = $candidate['attributes'];
-            $attributes['team_id'] = $batch->team_id;
+            if (! isset($candidate['resolution']) || $candidate['resolution']['action'] !== 'update') {
+                $attributes['team_id'] = $batch->team_id;
 
-            if ($actor->roleIn($batch->organization_id) === 'salesperson') {
-                $attributes['owner_user_id'] = $actor->id;
+                if ($actor->roleIn($batch->organization_id) === 'salesperson') {
+                    $attributes['owner_user_id'] = $actor->id;
+                }
             }
 
-            $validRows[] = [
+            $validRow = [
                 'line' => $candidate['line'],
                 'attributes' => $attributes,
             ];
+
+            if (isset($candidate['resolution'])) {
+                $validRow['resolution'] = $candidate['resolution'];
+            }
+
+            $validRows[] = $validRow;
         }
 
         return [
@@ -160,8 +230,8 @@ class CompanyImportService
     }
 
     /**
-     * @param  list<array{line: int, attributes: array<string, mixed>}>  $validRows
-     * @return array{createdRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
+     * @param  list<array{line: int, attributes: array<string, mixed>, resolution?: array{action: string, target_id?: int}}>  $validRows
+     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}>}
      */
     public function import(
         DataImport $batch,
@@ -178,12 +248,14 @@ class CompanyImportService
             $candidates[] = [
                 'line' => $row['line'],
                 'attributes' => $row['attributes'],
+                'resolution' => $row['resolution'] ?? null,
                 'keys' => $this->identityKeys($row['attributes']),
             ];
         }
 
         $existingKeys = $this->existingIdentityKeys($batch, $actor, $candidates);
         $createdRows = 0;
+        $updatedRows = 0;
         $duplicateRows = 0;
         $invalidRows = 0;
         $errors = [];
@@ -191,14 +263,20 @@ class CompanyImportService
         foreach ($candidates as $candidate) {
             $outsidePortfolio = false;
             $duplicate = false;
+            $matchingCompanyIds = [];
 
             foreach ($candidate['keys'] as $key) {
                 if (isset($existingKeys['hidden'][$key])) {
                     $outsidePortfolio = true;
                 } elseif (isset($existingKeys['visible'][$key])) {
                     $duplicate = true;
+                    foreach ($existingKeys['candidatesByKey'][$key] ?? [] as $company) {
+                        $matchingCompanyIds[] = $company['id'];
+                    }
                 }
             }
+
+            $matchingCompanyIds = array_values(array_unique($matchingCompanyIds));
 
             if ($outsidePortfolio) {
                 $invalidRows++;
@@ -207,7 +285,47 @@ class CompanyImportService
                 continue;
             }
 
-            if ($duplicate) {
+            if (($candidate['resolution']['action'] ?? null) === 'ignore') {
+                $duplicateRows++;
+
+                continue;
+            }
+
+            if (isset($candidate['resolution']) && in_array($candidate['resolution']['action'], ['update', 'resolve'], true)) {
+                $targetId = $candidate['resolution']['target_id'] ?? null;
+                $hasSingleCandidate = count($matchingCompanyIds) === 1;
+                $hasManualCandidate = $candidate['resolution']['action'] === 'resolve';
+                $target = is_int($targetId)
+                    && in_array($targetId, $matchingCompanyIds, true)
+                    && ($hasManualCandidate || $hasSingleCandidate)
+                    ? Company::query()
+                        ->where('organization_id', $batch->organization_id)
+                        ->visibleTo($actor)
+                        ->whereKey($targetId)
+                        ->lockForUpdate()
+                        ->first()
+                    : null;
+
+                if ($target === null) {
+                    $invalidRows++;
+                    $this->appendError($errors, $candidate['line'], 'invalid', 'O registro selecionado para atualização deixou de estar disponível no seu escopo.');
+
+                    continue;
+                }
+
+                $this->assertManagerStillManagesCompanyTeam($batch, $actor, $target);
+
+                $attributes = $candidate['attributes'];
+                unset($attributes['owner_user_id'], $attributes['team_id'], $attributes['tax_id']);
+                $target->fill(array_filter($attributes, fn (mixed $value): bool => $value !== null));
+                $target->save();
+                $scores->recalculateForCompany($target, 'Atualização por importação de planilha');
+                $updatedRows++;
+
+                continue;
+            }
+
+            if ($duplicate && (! isset($candidate['resolution']) || $candidate['resolution']['action'] !== 'create')) {
                 $duplicateRows++;
                 $this->appendError($errors, $candidate['line'], 'duplicate', 'A empresa passou a existir durante a importação; a linha foi ignorada com segurança.');
 
@@ -256,6 +374,7 @@ class CompanyImportService
 
         return [
             'createdRows' => $createdRows,
+            'updatedRows' => $updatedRows,
             'duplicateRows' => $duplicateRows,
             'invalidRows' => $invalidRows,
             'errors' => $errors,
@@ -330,7 +449,7 @@ class CompanyImportService
 
     /**
      * @param  list<array{line: int, attributes: array<string, mixed>, keys: list<string>}>  $candidates
-     * @return array{visible: array<string, true>, hidden: array<string, true>}
+     * @return array{visible: array<string, true>, hidden: array<string, true>, candidatesByKey: array<string, list<array{id: int, name: string, city: string|null, state: string|null, tax_id: string|null}>>}
      */
     private function existingIdentityKeys(DataImport $batch, User $actor, array $candidates): array
     {
@@ -365,7 +484,7 @@ class CompanyImportService
             })
             ->get(['id', 'tax_id', 'name', 'city', 'state']);
 
-        $keys = ['visible' => [], 'hidden' => []];
+        $keys = ['visible' => [], 'hidden' => [], 'candidatesByKey' => []];
 
         $visibleCompanyIds = Company::query()
             ->where('organization_id', $batch->organization_id)
@@ -385,6 +504,16 @@ class CompanyImportService
                 'state' => $company->state,
             ]) as $key) {
                 $keys[$visibility][$key] = true;
+
+                if ($visibility === 'visible') {
+                    $keys['candidatesByKey'][$key][] = [
+                        'id' => $company->id,
+                        'name' => $company->name,
+                        'city' => $company->city,
+                        'state' => $company->state,
+                        'tax_id' => $company->tax_id,
+                    ];
+                }
             }
         }
 
@@ -449,16 +578,109 @@ class CompanyImportService
         return (string) ($remainder < 2 ? 0 : 11 - $remainder);
     }
 
+    /**
+     * @param  array<string, mixed>  $attributes
+     * @param  array<int, array{id: int, name: string, city: string|null, state: string|null, tax_id: string|null}>  $matches
+     */
+    private function hasTaxIdMatch(array $attributes, array $matches): bool
+    {
+        $taxId = $attributes['tax_id'] ?? null;
+
+        if (! is_string($taxId) || $taxId === '') {
+            return false;
+        }
+
+        foreach ($matches as $match) {
+            if (is_string($match['tax_id']) && preg_replace('/\D+/', '', $match['tax_id']) === $taxId) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function assertManagerStillManagesCompanyTeam(DataImport $batch, User $actor, Company $company): void
+    {
+        if ($actor->roleIn($batch->organization_id) !== 'manager') {
+            return;
+        }
+
+        $teamId = $company->team_id;
+
+        if ($teamId === null) {
+            throw ValidationException::withMessages(['team_id' => 'Seu acesso a uma equipe da empresa foi alterado. Revise o lote antes de tentar novamente.']);
+        }
+
+        $team = Team::query()
+            ->where('organization_id', $batch->organization_id)
+            ->whereKey($teamId)
+            ->lockForUpdate()
+            ->first();
+        $membership = DB::table('team_memberships')
+            ->where('organization_id', $batch->organization_id)
+            ->where('team_id', $teamId)
+            ->where('user_id', $actor->id)
+            ->where('role', 'manager')
+            ->where('is_active', true)
+            ->lockForUpdate()
+            ->first();
+
+        if ($team === null || $team->status !== 'active' || $membership === null) {
+            throw ValidationException::withMessages(['team_id' => 'Seu acesso a uma equipe da empresa foi alterado. Revise o lote antes de tentar novamente.']);
+        }
+    }
+
+    private function maskTaxId(?string $taxId): ?string
+    {
+        $digits = preg_replace('/\D+/', '', $taxId ?? '') ?? '';
+
+        if (strlen($digits) !== 14) {
+            return null;
+        }
+
+        return substr($digits, 0, 2).'.***.***/****-'.substr($digits, -2);
+    }
+
+    /** @return array{action: string, target_id?: int}|null */
+    private function requestedResolution(DataImport $batch, int $line): ?array
+    {
+        $resolutions = $batch->duplicate_resolutions ?? [];
+
+        return $resolutions[$line] ?? null;
+    }
+
+    /**
+     * @param  array{action: string, target_id?: int}|null  $resolution
+     * @param  array<int, array{id: int, name: string, city: string|null, state: string|null, tax_id: string|null}>  $matches
+     */
+    private function resolvedTargetId(?array $resolution, array $matches): ?int
+    {
+        if (! in_array($resolution['action'] ?? null, ['update', 'resolve'], true)) {
+            return null;
+        }
+
+        if ($resolution['action'] === 'update') {
+            return count($matches) === 1 ? (int) array_key_first($matches) : null;
+        }
+
+        $targetId = $resolution['target_id'] ?? null;
+
+        return is_int($targetId) && isset($matches[$targetId]) ? $targetId : null;
+    }
+
     private function formatCnpj(string $digits): string
     {
         return preg_replace('/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/', '$1.$2.$3/$4-$5', $digits) ?? $digits;
     }
 
-    /** @param list<array{line: int, type: string, message: string}> $errors */
-    private function appendError(array &$errors, int $line, string $type, string $message): void
+    /**
+     * @param  list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}>  $errors
+     * @param  array{candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}  $context
+     */
+    private function appendError(array &$errors, int $line, string $type, string $message, array $context = []): void
     {
         if (count($errors) < 100) {
-            $errors[] = ['line' => $line, 'type' => $type, 'message' => $message];
+            $errors[] = ['line' => $line, 'type' => $type, 'message' => $message, ...$context];
         }
     }
 }

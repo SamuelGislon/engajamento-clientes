@@ -15,7 +15,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property int $created_by
  * @property int|null $team_id
  * @property array<string, int>|null $mapping
- * @property list<array{line: int, type: string, message: string}>|null $validation_errors
+ * @property list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}>|null $validation_errors
+ * @property array<int|string, array{action: string, target_id?: int}>|null $duplicate_resolutions
  * @property CarbonImmutable $expires_at
  * @property CarbonImmutable|null $confirmed_at
  * @property int $processed_rows
@@ -43,6 +44,7 @@ class DataImport extends Model
         'journey_mode',
         'mapping',
         'validation_errors',
+        'duplicate_resolutions',
         'total_rows',
         'valid_rows',
         'invalid_rows',
@@ -68,6 +70,7 @@ class DataImport extends Model
             'expires_at' => 'immutable_datetime',
             'mapping' => 'array',
             'validation_errors' => 'array',
+            'duplicate_resolutions' => 'array',
             'confirmed_at' => 'immutable_datetime',
             'processing_started_at' => 'immutable_datetime',
             'processing_heartbeat_at' => 'immutable_datetime',

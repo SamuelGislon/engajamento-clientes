@@ -324,8 +324,12 @@ it('shows confirmed purchase totals and last purchase on the company page', func
         'relationship_status' => 'customer',
     ]);
     $this->actingAs($seller)->withSession(['active_organization_id' => $organization->id]);
+    $organizationNow = now()->setTimezone($organization->timezone);
 
-    foreach ([['Compra anterior', '100.00', now()->subDays(20)], ['Compra recente', '300.00', now()->subDays(3)]] as [$description, $amount, $soldAt]) {
+    foreach ([
+        ['Compra anterior', '100.00', $organizationNow->copy()->subDays(20)],
+        ['Compra recente', '300.00', $organizationNow->copy()->subDays(3)],
+    ] as [$description, $amount, $soldAt]) {
         $this->post("/companies/{$company->id}/sales", [
             'seller_id' => $seller->id,
             'description' => $description,
@@ -342,7 +346,7 @@ it('shows confirmed purchase totals and last purchase on the company page', func
             ->where('salesSummary.total_amount', '400.00')
             ->where('salesSummary.purchase_count', 2)
             ->where('salesSummary.average_amount', '200.00')
-            ->where('salesSummary.last_sold_at', fn (string $value) => str_starts_with($value, now()->subDays(3)->toDateString()))
+            ->where('salesSummary.last_sold_at', fn (string $value) => str_starts_with($value, $organizationNow->copy()->subDays(3)->utc()->toDateString()))
             ->has('sales', 2));
 });
 

@@ -28,8 +28,8 @@
 - `companies.team_id`: equipe principal explícita da carteira; o responsável continua em `owner_user_id`.
 - `sales.team_id_at_sale`: snapshot da equipe no momento do registro, sem alterar `seller_id` histórico.
 - `notifications`: notificações Laravel por usuário; o campo `data` é JSON e inclui `organization_id` para filtrar cada workspace sem expor avisos de outros tenants.
-- `data_imports` (Fase 5 parcial): lote tenant-first, autor, equipe opcional, tipo (`companies`, `contacts` ou `sales`), estado, nome original sanitizado, disco/caminho privado, mapeamento de índices, até 100 mensagens genéricas de validação, contagens por resultado, tentativa, cursor de linha, falha e expiração em 24 horas. Chaves compostas obrigam autor e equipe a pertencerem à organização; o caminho privado é apagado na retenção.
-- `data_import_rows`: staging tenant-first por lote e número de linha, com chave composta única e índice de busca por estado. Guarda payload cifrado somente para linhas válidas de arquivos maiores que 250 linhas, agrupa linhas da mesma pessoa para manter seus vínculos atômicos, marca linhas concluídas e apaga o payload cifrado após o processamento ou expiração.
+- `data_imports` (Fase 5 parcial): lote tenant-first, autor, equipe opcional, tipo (`companies`, `contacts` ou `sales`), estado, nome original sanitizado, disco/caminho privado, mapeamento de índices, até 100 mensagens genéricas de validação, escolhas de resolução de duplicidades para empresas (`duplicate_resolutions` JSON), contagens por resultado, tentativa, cursor de linha, falha e expiração em 24 horas. Chaves compostas obrigam autor e equipe a pertencerem à organização; o caminho privado é apagado na retenção.
+- `data_import_rows`: staging tenant-first por lote e número de linha, com chave composta única e índice de busca por estado. Guarda payload cifrado somente para linhas válidas ou resolvidas de arquivos maiores que 250 linhas, agrupa linhas da mesma pessoa para manter seus vínculos atômicos, marca linhas concluídas e apaga o payload cifrado após o processamento ou expiração.
 
 ## Integridade e isolamento
 
@@ -59,6 +59,8 @@ Equipes e memberships têm chaves tenant-first para impedir vínculo a outra org
 - Organization 1:N DataImport; DataImport N:1 User (autor) e Team (equipe de destino opcional).
 
 Lotes de importação referenciam `(organization_id, created_by)` em `organization_user` e `(organization_id, team_id)` em `teams`. Índice tenant/status/expiração apoia a limpeza periódica. `processing_started_at` marca a tentativa ativa, `processing_heartbeat_at` registra o último bloco concluído para leases recuperáveis e `queue_dispatches` limita os reenvios da mesma tentativa. O job recebe apenas IDs de tenant e lote e o número da tentativa; os valores das linhas ficam cifrados em staging temporário e são apagados linha a linha quando processados ou quando o lote expira.
+
+`data_imports.duplicate_resolutions` guarda decisões explícitas por número de linha para deduplicação de empresas. Os candidatos e CNPJs mascarados ficam no snapshot de validação e são filtrados novamente ao exibir o lote; os payloads de gravação assíncrona carregam a decisão cifrada em `data_import_rows`.
 
 ## Atualização dos dados derivados
 
