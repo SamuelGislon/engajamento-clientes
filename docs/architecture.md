@@ -6,7 +6,7 @@ Aplicação monolítica modular em Laravel, organizada por domínios e servida p
 
 ## Módulos
 
-- **Organizations**: workspaces e memberships com função por organização.
+- **Organizations**: workspaces e memberships com função por organização. Novas organizações percorrem um onboarding retomável por owner; organizações existentes não recebem estado de onboarding retroativo.
 - **Companies**: carteira de empresas e responsáveis comerciais.
 - **Contacts**: pessoas e seus vínculos comerciais com uma ou mais empresas.
 - **Activities**: histórico manual de interações por empresa e, opcionalmente, por contato.
@@ -19,7 +19,7 @@ Aplicação monolítica modular em Laravel, organizada por domínios e servida p
 - **Reports**: agregações paginadas de atividades, relacionamento e vendas, com filtros de período/equipe/vendedor sob o mesmo escopo comercial.
 - **Imports (Fase 5 parcial)**: lotes privados de CSV/XLSX, prévia OpenSpout, mapeamento e validação de empresas, contatos/vínculos e vendas históricas, confirmação transacional/idempotente e limpeza agendada. Contatos podem se associar a várias empresas acessíveis. Vendas exigem empresa e vendedor autorizados, e reutilizam os recálculos comerciais da aplicação. Arquivos com até 250 linhas são confirmados sincronicamente; arquivos maiores usam staging cifrado no banco e jobs Redis em blocos de 100 linhas, com progresso, retry, retomada e limpeza após 24 horas. Importações de empresas permitem optar por nenhuma jornada, pela jornada padrão ou por um modelo de prospecção da organização; as escolhas explícitas de resolução ainda estão pendentes.
 - **Dashboard**: indicadores calculados a partir de empresas, vendas, tarefas, ocorrências e inscrições persistidas; gestores recebem desempenho das equipes que administram.
-- **Auth/Settings**: autenticação e configurações herdadas do starter kit oficial.
+- **Auth/Settings**: autenticação, configurações herdadas do starter kit oficial e onboarding guiado por organização.
 
 Equipes e relatórios hierárquicos de gestão permanecem nas fases correspondentes.
 
@@ -34,6 +34,8 @@ Form Requests verificam responsáveis e vínculos no escopo da organização. Po
 ## Autenticação e autorização
 
 O starter kit Laravel React usa Fortify e sessões Laravel. O cadastro comum cria conta, organização e membership owner em transação. Convites concedem inicialmente apenas manager ou salesperson; guardam hash de token com uso único e expiração, exigem e-mail verificado correspondente e são aceitos em transação. A conta global permanece independente das memberships em cada organização.
+
+Organizações criadas pelo cadastro iniciam o onboarding depois da verificação de e-mail. O progresso fica na própria linha da organização: dados e fuso, alertas comerciais iniciais, jornada padrão, convites e carteira. Convites, equipes e carteira são opcionais e reutilizam as telas existentes. Enquanto o owner não concluir, o dashboard encaminha para a etapa salva; organizações anteriores, sem etapa de onboarding, seguem sem essa exigência.
 
 ## Organização do código
 

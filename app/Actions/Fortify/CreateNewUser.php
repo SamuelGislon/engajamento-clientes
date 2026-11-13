@@ -73,6 +73,7 @@ class CreateNewUser implements CreatesNewUsers
             $organization = Organization::create([
                 'name' => $input['organization_name'],
                 'timezone' => config('app.timezone', 'America/Sao_Paulo'),
+                'onboarding_step' => 'organization',
             ]);
 
             $organization->users()->attach($user, ['role' => 'owner']);

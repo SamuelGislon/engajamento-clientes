@@ -34,6 +34,23 @@ class EnsureOrganizationSelected
         $request->session()->put('active_organization_id', $organization->id);
         app(TenantContext::class)->set($organization);
 
+        if ($organization->onboarding_step !== null
+            && $organization->onboarding_completed_at === null
+            && $user->roleIn($organization->id) === 'owner') {
+            $routeName = $request->route()?->getName() ?? '';
+            $canUseOnboardingResources = str_starts_with($routeName, 'onboarding.')
+                || str_starts_with($routeName, 'organization.users.')
+                || str_starts_with($routeName, 'organization.invitations.')
+                || str_starts_with($routeName, 'companies.')
+                || str_starts_with($routeName, 'journeys.')
+                || str_starts_with($routeName, 'teams.')
+                || str_starts_with($routeName, 'imports.');
+
+            if (! $canUseOnboardingResources) {
+                return redirect()->route('onboarding.show');
+            }
+        }
+
         return $next($request);
     }
 }

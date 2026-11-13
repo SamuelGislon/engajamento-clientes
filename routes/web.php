@@ -11,6 +11,7 @@ use App\Http\Controllers\DataImportController;
 use App\Http\Controllers\JourneyEnrollmentController;
 use App\Http\Controllers\JourneyTemplateController;
 use App\Http\Controllers\NotificationController;
+use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\OrganizationInvitationController;
 use App\Http\Controllers\OrganizationMemberController;
 use App\Http\Controllers\OrganizationSwitchController;
@@ -34,6 +35,12 @@ Route::middleware(['auth', 'verified'])->group(function (): void {
     Route::post('/organization/switch', OrganizationSwitchController::class)->name('organizations.switch');
 
     Route::middleware(EnsureOrganizationSelected::class)->group(function (): void {
+        Route::get('/onboarding', [OnboardingController::class, 'show'])->name('onboarding.show');
+        Route::patch('/onboarding/organization', [OnboardingController::class, 'updateOrganization'])->name('onboarding.organization.update');
+        Route::patch('/onboarding/relationship', [OnboardingController::class, 'updateRelationship'])->name('onboarding.relationship.update');
+        Route::patch('/onboarding/journeys', [OnboardingController::class, 'updateJourneys'])->name('onboarding.journeys.update');
+        Route::post('/onboarding/continue', [OnboardingController::class, 'advance'])->name('onboarding.continue');
+        Route::post('/onboarding/complete', [OnboardingController::class, 'complete'])->name('onboarding.complete');
         Route::get('/dashboard', DashboardController::class)->name('dashboard');
         Route::get('/imports', [DataImportController::class, 'index'])->name('imports.index');
         Route::post('/imports', [DataImportController::class, 'store'])->name('imports.store');

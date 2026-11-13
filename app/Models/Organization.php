@@ -15,11 +15,20 @@ class Organization extends Model
     /** @use HasFactory<OrganizationFactory> */
     use HasFactory;
 
-    protected $fillable = ['name', 'timezone', 'auto_enroll_default_journey'];
+    protected $fillable = [
+        'name',
+        'timezone',
+        'auto_enroll_default_journey',
+        'onboarding_step',
+        'onboarding_completed_at',
+    ];
 
     protected function casts(): array
     {
-        return ['auto_enroll_default_journey' => 'boolean'];
+        return [
+            'auto_enroll_default_journey' => 'boolean',
+            'onboarding_completed_at' => 'datetime',
+        ];
     }
 
     /** @return BelongsToMany<User, $this, OrganizationMembership, 'pivot'> */

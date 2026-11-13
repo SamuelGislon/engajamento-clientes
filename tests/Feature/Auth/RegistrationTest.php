@@ -50,6 +50,14 @@ class RegistrationTest extends TestCase
             'is_active' => true,
             'is_default' => true,
         ]);
+        $this->assertDatabaseHas('organizations', [
+            'id' => $organizationId,
+            'onboarding_step' => 'organization',
+            'onboarding_completed_at' => null,
+        ]);
         $this->assertSame(4, DB::table('journey_steps')->where('organization_id', $organizationId)->count());
+
+        auth()->user()->forceFill(['email_verified_at' => now()])->save();
+        $this->get(route('dashboard'))->assertRedirect(route('onboarding.show'));
     }
 }

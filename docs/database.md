@@ -3,7 +3,7 @@
 ## Entidades implementadas
 
 - `users`: identidade global de autenticação.
-- `organizations`: workspace SaaS e configurações básicas.
+- `organizations`: workspace SaaS, configurações básicas e estado retomável de onboarding (`onboarding_step`, `onboarding_completed_at`). Registros existentes deixam esses campos nulos e não são conduzidos ao onboarding; novas organizações iniciam em `organization`.
 - `organization_user`: membership com função por workspace; uma pessoa pode ter memberships independentes.
 - `companies`: empresas-clientes ou prospectos, com tenant, situação e responsável comercial opcional.
 - `contacts`: profissionais por organização, sem exigir CNPJ ou dados pessoais não pertinentes.
