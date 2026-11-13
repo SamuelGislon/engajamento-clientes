@@ -16,9 +16,12 @@ use JsonException;
 use RuntimeException;
 
 /**
+ * @phpstan-import-type ContactImportError from ContactImportService
+ *
  * @phpstan-type CompanyImportRow array{line: int, attributes: array<string, mixed>, resolution?: array{action: string, target_id?: int}}
- * @phpstan-type ContactImportRow array{line: int, identity: string, attributes: array<string, mixed>, company_id: int, roles: list<string>, is_primary: bool, relationship_notes: string|null}
+ * @phpstan-type ContactImportRow array{line: int, identity: string, attributes: array<string, mixed>, company_id: int, roles: list<string>, is_primary: bool, relationship_notes: string|null, resolution?: array{action: string, target_id?: int}}
  * @phpstan-type SaleImportRow array{line: int, external_id: string|null, company_id: int, seller_id: int, description: string, amount: string, currency: string, sold_at: string, status: string, notes: string|null}
+ * @phpstan-type ImportValidationError array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, email_masked?: string|null, phone_masked?: string|null, city?: string|null, state?: string|null, tax_id_masked?: string|null}>, can_create?: bool, lines?: list<int>}
  */
 class DataImportProcessor
 {
@@ -109,7 +112,7 @@ class DataImportProcessor
 
     /**
      * @param  EloquentCollection<int, DataImportRow>  $stagedRows
-     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
+     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<ImportValidationError>}
      */
     public function importRows(
         DataImport $batch,
@@ -196,6 +199,28 @@ class DataImportProcessor
         foreach ($this->decodeRows($stagedRows) as $row) {
             $roles = $row['roles'] ?? null;
             $relationshipNotes = $row['relationship_notes'] ?? null;
+            $resolution = null;
+            $rawResolution = $row['resolution'] ?? null;
+
+            if ($rawResolution !== null) {
+                if (! is_array($rawResolution)) {
+                    throw new RuntimeException('The staged contact import resolution is invalid.');
+                }
+
+                $action = $rawResolution['action'] ?? null;
+                $targetId = $rawResolution['target_id'] ?? null;
+
+                if (! is_string($action)
+                    || ! in_array($action, ['create', 'update', 'resolve'], true)
+                    || ($targetId !== null && ! is_int($targetId))) {
+                    throw new RuntimeException('The staged contact import resolution is invalid.');
+                }
+
+                $resolution = [
+                    'action' => $action,
+                    ...(is_int($targetId) ? ['target_id' => $targetId] : []),
+                ];
+            }
 
             if (! is_int($row['line'] ?? null)
                 || ! is_string($row['identity'] ?? null)
@@ -233,6 +258,7 @@ class DataImportProcessor
                 'roles' => $contactRoles,
                 'is_primary' => $row['is_primary'],
                 'relationship_notes' => $relationshipNotes,
+                ...($resolution !== null ? ['resolution' => $resolution] : []),
             ];
         }
 

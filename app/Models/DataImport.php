@@ -15,7 +15,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property int $created_by
  * @property int|null $team_id
  * @property array<string, int>|null $mapping
- * @property list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}>|null $validation_errors
+ * @property list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, lines?: list<int>}>|null $validation_errors
  * @property array<int|string, array{action: string, target_id?: int}>|null $duplicate_resolutions
  * @property CarbonImmutable $expires_at
  * @property CarbonImmutable|null $confirmed_at
@@ -29,6 +29,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  */
 class DataImport extends Model
 {
+    public const MAX_VALIDATION_ERRORS = 100;
+
     /** @use HasFactory<DataImportFactory> */
     use BelongsToOrganization, HasFactory;
 

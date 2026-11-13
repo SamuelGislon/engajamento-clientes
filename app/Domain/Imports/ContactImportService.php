@@ -10,10 +10,14 @@ use App\Models\DataImport;
 use App\Models\Team;
 use App\Models\User;
 use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
 
+/**
+ * @phpstan-type ContactImportError array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, email_masked: string|null, phone_masked: string|null}>, can_create?: bool, lines?: list<int>}
+ */
 class ContactImportService
 {
     /**
@@ -21,10 +25,10 @@ class ContactImportService
      * @param  list<int>  $malformedRows
      * @return array{
      *     totalRows: int,
-     *     validRows: list<array{line: int, identity: string, attributes: array<string, mixed>, company_id: int, roles: list<string>, is_primary: bool, relationship_notes: string|null}>,
+     *     validRows: list<array{line: int, identity: string, attributes: array<string, mixed>, company_id: int, roles: list<string>, is_primary: bool, relationship_notes: string|null, resolution?: array{action: string, target_id?: int}}>,
      *     invalidRows: int,
      *     duplicateRows: int,
-     *     errors: list<array{line: int, type: string, message: string}>
+     *     errors: list<ContactImportError>
      * }
      */
     public function analyze(DataImport $batch, User $actor, array $rows, int $totalRows, bool $lockDestination = false, array $malformedRows = []): array
@@ -132,20 +136,67 @@ class ContactImportService
         $duplicateRows = 0;
 
         foreach ($grouped as $identity => $personRows) {
-            if (isset($existingIdentities['hidden'][$identity])) {
-                foreach ($personRows as $candidate) {
-                    $invalidRows++;
-                    $this->appendError($errors, $candidate['line'], 'invalid', 'A linha não pode ser importada no escopo de acesso atual.');
-                }
+            $matchingContacts = $existingIdentities['visible'][$identity] ?? [];
+            $resolution = $this->requestedResolution($batch, $personRows[0]['line']);
+            $resolutionAction = $resolution['action'] ?? null;
+
+            if ($resolutionAction === 'ignore') {
+                $duplicateRows += count($personRows);
 
                 continue;
             }
 
-            if (isset($existingIdentities['visible'][$identity])) {
-                foreach ($personRows as $candidate) {
-                    $duplicateRows++;
-                    $this->appendError($errors, $candidate['line'], 'duplicate', 'O contato já existe nesta organização; a linha será ignorada.');
+            if ($matchingContacts !== [] && ! in_array($resolutionAction, ['create', 'update', 'resolve'], true)) {
+                $duplicateRows += count($personRows);
+                $this->appendError($errors, $personRows[0]['line'], 'duplicate', 'O contato já existe nesta organização. Escolha criar, atualizar, resolver manualmente ou ignorar as linhas.', [
+                    'candidates' => array_map(fn (array $contact): array => [
+                        'id' => $contact['id'],
+                        'name' => $contact['name'],
+                        'email_masked' => $this->maskEmail($contact['email']),
+                        'phone_masked' => $this->maskPhone($contact['phone']),
+                    ], $matchingContacts),
+                    'can_create' => true,
+                    'lines' => array_column($personRows, 'line'),
+                ]);
+
+                continue;
+            }
+
+            if ($matchingContacts === [] && in_array($resolutionAction, ['update', 'resolve'], true)) {
+                $invalidRows += count($personRows);
+                $this->appendError($errors, $personRows[0]['line'], 'invalid', 'O contato escolhido deixou de corresponder aos dados ou não está mais acessível. Revise a linha antes de continuar.', [
+                    'lines' => array_column($personRows, 'line'),
+                ]);
+
+                continue;
+            }
+
+            $targetId = null;
+            $requestedTargetId = $resolution['target_id'] ?? null;
+            if ($resolutionAction === 'update'
+                && count($matchingContacts) === 1
+                && $requestedTargetId === $matchingContacts[0]['id']) {
+                $targetId = $matchingContacts[0]['id'];
+            } elseif ($resolutionAction === 'resolve') {
+                if (is_int($requestedTargetId) && in_array($requestedTargetId, array_column($matchingContacts, 'id'), true)) {
+                    $targetId = $requestedTargetId;
                 }
+            }
+
+            if ($matchingContacts !== []
+                && in_array($resolutionAction, ['update', 'resolve'], true)
+                && $targetId === null) {
+                $duplicateRows += count($personRows);
+                $this->appendError($errors, $personRows[0]['line'], 'duplicate', 'A resolução precisa apontar para um único contato correspondente e visível.', [
+                    'candidates' => array_map(fn (array $contact): array => [
+                        'id' => $contact['id'],
+                        'name' => $contact['name'],
+                        'email_masked' => $this->maskEmail($contact['email']),
+                        'phone_masked' => $this->maskPhone($contact['phone']),
+                    ], $matchingContacts),
+                    'can_create' => true,
+                    'lines' => array_column($personRows, 'line'),
+                ]);
 
                 continue;
             }
@@ -164,6 +215,14 @@ class ContactImportService
 
             foreach ($personRows as &$personRow) {
                 $personRow['attributes'] = $mergedAttributes;
+                if ($resolutionAction === 'create') {
+                    $personRow['resolution'] = ['action' => 'create'];
+                } elseif ($targetId !== null) {
+                    $personRow['resolution'] = [
+                        'action' => $resolutionAction,
+                        'target_id' => $targetId,
+                    ];
+                }
             }
             unset($personRow);
 
@@ -182,7 +241,6 @@ class ContactImportService
                         $this->appendError($errors, $candidate['line'], 'ambiguous', 'A pessoa aparece mais de uma vez para a mesma empresa com dados de vínculo diferentes.');
                     } else {
                         $duplicateRows++;
-                        $this->appendError($errors, $candidate['line'], 'duplicate', 'Vínculo repetido no arquivo; a linha será ignorada.');
                     }
 
                     continue;
@@ -226,8 +284,8 @@ class ContactImportService
     }
 
     /**
-     * @param  list<array{line: int, identity: string, attributes: array<string, mixed>, company_id: int, roles: list<string>, is_primary: bool, relationship_notes: string|null}>  $validRows
-     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
+     * @param  list<array{line: int, identity: string, attributes: array<string, mixed>, company_id: int, roles: list<string>, is_primary: bool, relationship_notes: string|null, resolution?: array{action: string, target_id?: int}}>  $validRows
+     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<ContactImportError>}
      */
     public function import(DataImport $batch, User $actor, array $validRows): array
     {
@@ -252,37 +310,79 @@ class ContactImportService
             $groups[$row['identity']][] = $row;
         }
 
+        $this->lockContactIdentityKeys($batch, array_values($groups));
+
         $createdRows = 0;
+        $updatedRows = 0;
         $duplicateRows = 0;
         $invalidRows = 0;
         $errors = [];
 
         foreach ($groups as $identity => $personRows) {
             $attributes = $personRows[0]['attributes'];
-            $existing = $this->findExistingContact($batch, $attributes, true);
-
-            if ($existing !== null) {
-                $canViewExisting = Contact::query()
-                    ->where('organization_id', $batch->organization_id)
-                    ->visibleTo($actor)
-                    ->whereKey($existing->id)
-                    ->exists();
-
-                foreach ($personRows as $row) {
-                    if ($canViewExisting) {
-                        $duplicateRows++;
-                        $this->appendError($errors, $row['line'], 'duplicate', 'O contato passou a existir durante a importação; as linhas foram ignoradas com segurança.');
-                    } else {
-                        $invalidRows++;
-                        $this->appendError($errors, $row['line'], 'invalid', 'A linha não pode ser importada no escopo de acesso atual.');
-                    }
-                }
-
-                continue;
+            $resolution = $personRows[0]['resolution'] ?? null;
+            $matchingContacts = $this->matchingContacts($batch, $actor, $attributes, false);
+            $matchingIds = $matchingContacts->modelKeys();
+            if ($matchingIds !== []) {
+                $this->lockVisibleContactCompanyScopes($batch, $actor, array_values(array_map('intval', $matchingIds)));
+                $matchingContacts = $this->matchingContacts($batch, $actor, $attributes, true);
+                $matchingIds = $matchingContacts->modelKeys();
             }
 
-            $contact = Contact::query()->create($attributes);
-            $createdRows++;
+            $action = $resolution['action'] ?? null;
+            $targetId = $resolution['target_id'] ?? null;
+            $contact = null;
+
+            if (in_array($action, ['update', 'resolve'], true)) {
+                $hasSingleTarget = $action === 'resolve' || count($matchingIds) === 1;
+                if (! is_int($targetId) || ! $hasSingleTarget || ! in_array($targetId, $matchingIds, true)) {
+                    $invalidRows += count($personRows);
+                    $this->appendError($errors, $personRows[0]['line'], 'invalid', 'O contato escolhido deixou de corresponder aos dados ou não está mais acessível. Revise a linha antes de continuar.');
+
+                    continue;
+                }
+
+                $this->lockVisibleContactCompanyScopes($batch, $actor, [$targetId]);
+                $contact = Contact::query()
+                    ->where('organization_id', $batch->organization_id)
+                    ->visibleTo($actor)
+                    ->whereKey($targetId)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($contact === null) {
+                    $invalidRows += count($personRows);
+                    $this->appendError($errors, $personRows[0]['line'], 'invalid', 'O contato escolhido deixou de estar acessível. Revise a linha antes de continuar.');
+
+                    continue;
+                }
+
+                unset($attributes['status']);
+                $contact->fill(array_filter($attributes, static fn (mixed $value): bool => $value !== null));
+                $contact->save();
+                $updatedRows++;
+            } elseif ($action === 'create') {
+                $contact = Contact::query()->create($attributes);
+                $createdRows++;
+            } elseif ($matchingIds !== []) {
+                $duplicateRows += count($personRows);
+                $this->appendError($errors, $personRows[0]['line'], 'duplicate', 'O contato passou a existir durante a importação; as linhas foram ignoradas com segurança.', [
+                    'candidates' => array_values(array_map(fn (Contact $matchingContact): array => [
+                        'id' => (int) $matchingContact->id,
+                        'name' => $matchingContact->name,
+                        'email_masked' => $this->maskEmail($matchingContact->email),
+                        'phone_masked' => $this->maskPhone($matchingContact->phone),
+                    ], $matchingContacts->all())),
+                    'can_create' => true,
+                    'lines' => array_column($personRows, 'line'),
+                ]);
+
+                continue;
+            } else {
+                $contact = Contact::query()->create($attributes);
+                $createdRows++;
+            }
+
             $attachedCompanyIds = [];
 
             foreach ($personRows as $row) {
@@ -299,6 +399,18 @@ class ContactImportService
 
                 if ($company === null) {
                     throw ValidationException::withMessages(['file' => 'Uma empresa deixou de estar acessível durante a importação. Nenhum registro foi confirmado.']);
+                }
+
+                $alreadyLinked = DB::table('company_contacts')
+                    ->where('organization_id', $batch->organization_id)
+                    ->where('company_id', $company->id)
+                    ->where('contact_id', $contact->id)
+                    ->exists();
+
+                if ($alreadyLinked) {
+                    $attachedCompanyIds[$company->id] = true;
+
+                    continue;
                 }
 
                 if ($row['is_primary']) {
@@ -318,7 +430,7 @@ class ContactImportService
             }
         }
 
-        return ['createdRows' => $createdRows, 'updatedRows' => 0, 'duplicateRows' => $duplicateRows, 'invalidRows' => $invalidRows, 'errors' => $errors];
+        return ['createdRows' => $createdRows, 'updatedRows' => $updatedRows, 'duplicateRows' => $duplicateRows, 'invalidRows' => $invalidRows, 'errors' => $errors];
     }
 
     private function assertDestinationStillAuthorized(DataImport $batch, User $actor, bool $lockDestination): void
@@ -527,7 +639,7 @@ class ContactImportService
 
     /**
      * @param  list<array{identity: string, attributes: array<string, mixed>}>  $candidates
-     * @return array{visible: array<string, true>, hidden: array<string, true>}
+     * @return array{visible: array<string, list<array{id: int, name: string, email: string|null, phone: string|null}>>}
      */
     private function existingIdentities(DataImport $batch, User $actor, array $candidates): array
     {
@@ -550,6 +662,7 @@ class ContactImportService
 
         $existingContacts = Contact::query()
             ->where('organization_id', $batch->organization_id)
+            ->visibleTo($actor)
             ->where(function ($contacts) use ($emails, $names): void {
                 if ($emails !== []) {
                     $contacts->whereIn(DB::raw('LOWER(email)'), array_unique($emails));
@@ -561,53 +674,165 @@ class ContactImportService
             })
             ->get(['id', 'name', 'email', 'phone']);
 
-        $visibleContactIds = Contact::query()
-            ->where('organization_id', $batch->organization_id)
-            ->visibleTo($actor)
-            ->whereIn('contacts.id', $existingContacts->modelKeys())
-            ->pluck('contacts.id')
-            ->map(static fn (int|string $id): int => (int) $id)
-            ->all();
-        $identities = ['visible' => [], 'hidden' => []];
+        $identities = ['visible' => []];
 
         foreach ($candidates as $candidate) {
             foreach ($existingContacts as $contact) {
-                $emailMatches = ! empty($candidate['attributes']['email'])
-                    && mb_strtolower((string) $contact->email) === mb_strtolower((string) $candidate['attributes']['email']);
-                $phoneMatches = $this->digits((string) $contact->phone) !== ''
-                    && $this->digits((string) $contact->phone) === $this->digits((string) ($candidate['attributes']['phone'] ?? ''));
-                $nameMatches = mb_strtolower($this->normalize($contact->name)) === mb_strtolower($this->normalize((string) $candidate['attributes']['name']));
-
-                if ($emailMatches || ($nameMatches && $phoneMatches)) {
-                    $visibility = in_array((int) $contact->id, $visibleContactIds, true) ? 'visible' : 'hidden';
-                    $identities[$visibility][$candidate['identity']] = true;
-                    break;
+                if ($this->contactMatchesIdentity($candidate['attributes'], $contact)) {
+                    $identities['visible'][$candidate['identity']][(int) $contact->id] = [
+                        'id' => (int) $contact->id,
+                        'name' => $contact->name,
+                        'email' => $contact->email,
+                        'phone' => $contact->phone,
+                    ];
                 }
             }
+        }
+
+        foreach ($identities['visible'] as $identity => $contacts) {
+            ksort($contacts);
+            $identities['visible'][$identity] = array_values($contacts);
         }
 
         return $identities;
     }
 
     /** @param array<string, mixed> $attributes */
-    private function findExistingContact(DataImport $batch, array $attributes, bool $lock): ?Contact
+    /**
+     * @param  array<string, mixed>  $attributes
+     * @return Collection<int, Contact>
+     */
+    private function matchingContacts(DataImport $batch, User $actor, array $attributes, bool $lock): Collection
     {
-        $query = Contact::query()->where('organization_id', $batch->organization_id);
-        if (! empty($attributes['email'])) {
-            return $query->whereRaw('LOWER(email) = ?', [mb_strtolower((string) $attributes['email'])])
-                ->when($lock, fn ($contacts) => $contacts->lockForUpdate())
-                ->first();
+        $email = mb_strtolower((string) ($attributes['email'] ?? ''));
+        $name = mb_strtolower($this->normalize((string) ($attributes['name'] ?? '')));
+        $phone = $this->digits((string) ($attributes['phone'] ?? ''));
+
+        if ($email === '' && ($name === '' || $phone === '')) {
+            return Contact::query()->whereRaw('1 = 0')->get();
         }
 
+        return Contact::query()
+            ->where('organization_id', $batch->organization_id)
+            ->visibleTo($actor)
+            ->where(function ($contacts) use ($email, $name): void {
+                if ($email !== '') {
+                    $contacts->whereRaw('LOWER(email) = ?', [$email]);
+                }
+                if ($name !== '') {
+                    $method = $email === '' ? 'whereRaw' : 'orWhereRaw';
+                    $contacts->{$method}('LOWER(name) = ?', [$name]);
+                }
+            })
+            ->when($lock, fn ($contacts) => $contacts->orderBy('id')->lockForUpdate())
+            ->orderBy('id')
+            ->get(['id', 'name', 'email', 'phone'])
+            ->filter(fn (Contact $contact): bool => $this->contactMatchesIdentity($attributes, $contact))
+            ->values();
+    }
+
+    /** @param array<string, mixed> $attributes */
+    private function contactMatchesIdentity(array $attributes, Contact $contact): bool
+    {
+        $email = mb_strtolower((string) ($attributes['email'] ?? ''));
+        $emailMatches = $email !== '' && $email === mb_strtolower((string) $contact->email);
         $phone = $this->digits((string) ($attributes['phone'] ?? ''));
-        if ($phone === '') {
+        $phoneMatches = $phone !== '' && $phone === $this->digits((string) $contact->phone);
+        $nameMatches = mb_strtolower($this->normalize((string) ($attributes['name'] ?? '')))
+            === mb_strtolower($this->normalize($contact->name));
+
+        return $emailMatches || ($nameMatches && $phoneMatches);
+    }
+
+    /**
+     * @param  list<list<array{line: int, attributes: array<string, mixed> }>>  $groups
+     */
+    private function lockContactIdentityKeys(DataImport $batch, array $groups): void
+    {
+        if (DB::connection()->getDriverName() !== 'pgsql') {
+            return;
+        }
+
+        $lockIds = [];
+
+        foreach ($groups as $personRows) {
+            foreach ($personRows as $personRow) {
+                foreach ($this->identityKeys($personRow['attributes'], $personRow['line']) as $identityKey) {
+                    if (str_starts_with($identityKey, 'line:')) {
+                        continue;
+                    }
+
+                    $lockIds[] = (int) hexdec(substr(hash('sha256', 'contact-import:'.$batch->organization_id.':'.$identityKey), 0, 15));
+                }
+            }
+        }
+
+        $lockIds = array_values(array_unique($lockIds));
+        sort($lockIds, SORT_NUMERIC);
+
+        foreach ($lockIds as $lockId) {
+            DB::select('SELECT pg_advisory_xact_lock(?)', [$lockId]);
+        }
+    }
+
+    /**
+     * @param  list<int>  $contactIds
+     */
+    private function lockVisibleContactCompanyScopes(DataImport $batch, User $actor, array $contactIds): void
+    {
+        if ($contactIds === []) {
+            return;
+        }
+
+        $companies = Company::query()
+            ->where('organization_id', $batch->organization_id)
+            ->visibleTo($actor)
+            ->whereHas('contacts', fn ($contacts) => $contacts->whereIn('contacts.id', $contactIds))
+            ->orderBy('companies.id')
+            ->lockForUpdate()
+            ->get(['companies.id', 'companies.team_id']);
+
+        $this->lockManagerCompanyScopes($batch, $actor, array_values($companies->all()), true);
+    }
+
+    /** @return array{action: string, target_id?: int}|null */
+    private function requestedResolution(DataImport $batch, int $line): ?array
+    {
+        $resolutions = $batch->duplicate_resolutions ?? [];
+        $resolution = $resolutions[$line] ?? $resolutions[(string) $line] ?? null;
+
+        if ($resolution === null) {
             return null;
         }
 
-        return $query->whereRaw('LOWER(name) = ?', [mb_strtolower($this->normalize((string) $attributes['name']))])
-            ->when($lock, fn ($contacts) => $contacts->lockForUpdate())
-            ->get()
-            ->first(fn (Contact $contact): bool => $this->digits((string) $contact->phone) === $phone);
+        $targetId = $resolution['target_id'] ?? null;
+
+        return [
+            'action' => $resolution['action'],
+            ...(is_int($targetId) ? ['target_id' => $targetId] : []),
+        ];
+    }
+
+    private function maskEmail(?string $email): ?string
+    {
+        if ($email === null || ! str_contains($email, '@')) {
+            return null;
+        }
+
+        [$local, $domain] = explode('@', $email, 2);
+
+        if ($local === '') {
+            return null;
+        }
+
+        return mb_substr($local, 0, 1).'***'.(mb_strlen($local) > 1 ? mb_substr($local, -1) : '').'@'.$domain;
+    }
+
+    private function maskPhone(?string $phone): ?string
+    {
+        $digits = $this->digits((string) $phone);
+
+        return strlen($digits) < 4 ? null : '***'.substr($digits, -4);
     }
 
     /**
@@ -785,11 +1010,13 @@ class ContactImportService
         return preg_replace('/\D+/', '', $value) ?? '';
     }
 
-    /** @param list<array{line: int, type: string, message: string}> $errors */
-    private function appendError(array &$errors, int $line, string $type, string $message): void
+    /** @param list<ContactImportError> $errors
+     * @param  array{candidates?: list<array{id: int, name: string, email_masked: string|null, phone_masked: string|null}>, can_create?: bool, lines?: list<int>}  $context
+     */
+    private function appendError(array &$errors, int $line, string $type, string $message, array $context = []): void
     {
-        if (count($errors) < 100) {
-            $errors[] = ['line' => $line, 'type' => $type, 'message' => $message];
+        if (count($errors) < DataImport::MAX_VALIDATION_ERRORS) {
+            $errors[] = ['line' => $line, 'type' => $type, 'message' => $message, ...$context];
         }
     }
 }

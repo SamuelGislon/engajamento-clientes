@@ -5,12 +5,136 @@ use App\Domain\Imports\ContactImportService;
 use App\Domain\Imports\DataImportProcessor;
 use App\Domain\Tenancy\TenantContext;
 use App\Models\Company;
+use App\Models\Contact;
 use App\Models\DataImport;
 use App\Models\Organization;
 use App\Models\Team;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Symfony\Component\Process\Process;
+
+it('serializes concurrent contact identity creation across different destination companies', function () {
+    if (DB::connection()->getDriverName() !== 'pgsql') {
+        $this->markTestSkipped('Concurrent contact identity creation is verified against PostgreSQL.');
+    }
+
+    $organization = Organization::factory()->create();
+    $owner = User::factory()->create();
+    $organization->users()->attach($owner, ['role' => 'owner']);
+    app(TenantContext::class)->set($organization);
+    $firstCompany = Company::factory()->create(['organization_id' => $organization->id, 'name' => 'Escritório de origem']);
+    $secondCompany = Company::factory()->create(['organization_id' => $organization->id, 'name' => 'Escritório concorrente']);
+    $firstBatch = DataImport::factory()->create([
+        'organization_id' => $organization->id,
+        'created_by' => $owner->id,
+        'record_type' => 'contacts',
+        'status' => 'validated',
+        'mapping' => ['name' => 0, 'email' => 1],
+    ]);
+    $secondBatch = DataImport::factory()->create([
+        'organization_id' => $organization->id,
+        'created_by' => $owner->id,
+        'record_type' => 'contacts',
+        'status' => 'validated',
+        'mapping' => ['name' => 0, 'email' => 1],
+    ]);
+    DB::connection()->commit();
+
+    $startedMarker = tempnam(sys_get_temp_dir(), 'contact-identity-lock-');
+    expect($startedMarker)->not->toBeFalse();
+    @unlink($startedMarker);
+    $worker = null;
+
+    try {
+        DB::beginTransaction();
+        Organization::query()->lockForUpdate()->findOrFail($organization->id);
+        $firstResult = app(ContactImportService::class)->import($firstBatch, $owner, [[
+            'line' => 2,
+            'identity' => 'group:2',
+            'attributes' => ['name' => 'Contato criado simultaneamente', 'email' => 'concorrente@example.test', 'phone' => '+5511999993333', 'status' => 'active'],
+            'company_id' => $firstCompany->id,
+            'roles' => ['buyer'],
+            'is_primary' => false,
+            'relationship_notes' => null,
+        ]]);
+        expect($firstResult['createdRows'])->toBe(1);
+
+        $script = <<<'PHP'
+require 'vendor/autoload.php';
+$app = require 'bootstrap/app.php';
+$app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$organization = \App\Models\Organization::query()->findOrFail((int) $argv[1]);
+app(\App\Domain\Tenancy\TenantContext::class)->set($organization);
+$marker = $argv[2];
+file_put_contents($marker.'.started', 'started');
+$result = \Illuminate\Support\Facades\DB::transaction(function () use ($argv): array {
+    $batch = \App\Models\DataImport::query()->findOrFail((int) $argv[3]);
+    $actor = \App\Models\User::query()->findOrFail((int) $argv[4]);
+
+    return app(\App\Domain\Imports\ContactImportService::class)->import($batch, $actor, [[
+        'line' => 2,
+        'identity' => 'group:2',
+        'attributes' => ['name' => 'Contato criado simultaneamente', 'email' => 'concorrente@example.test', 'phone' => '+5511999993333', 'status' => 'active'],
+        'company_id' => (int) $argv[5],
+        'roles' => ['buyer'],
+        'is_primary' => false,
+        'relationship_notes' => null,
+    ]]);
+});
+file_put_contents($marker.'.result', json_encode($result, JSON_THROW_ON_ERROR));
+file_put_contents($marker.'.done', 'done');
+PHP;
+        $worker = new Process([
+            PHP_BINARY,
+            '-r',
+            $script,
+            (string) $organization->id,
+            $startedMarker,
+            (string) $secondBatch->id,
+            (string) $owner->id,
+            (string) $secondCompany->id,
+        ], base_path(), timeout: 30);
+        $worker->start();
+
+        $deadline = microtime(true) + 10;
+        while (microtime(true) < $deadline && ! file_exists($startedMarker.'.started')) {
+            usleep(25_000);
+        }
+
+        expect(file_exists($startedMarker.'.started'))->toBeTrue('The competing contact import did not start.');
+        usleep(300_000);
+        expect($worker->isRunning())->toBeTrue('The second import must wait for the first identity decision to commit.');
+        expect(file_exists($startedMarker.'.done'))->toBeFalse();
+
+        DB::connection()->commit();
+        $worker->wait();
+
+        expect($worker->getExitCode())->toBe(0, $worker->getErrorOutput())
+            ->and(file_exists($startedMarker.'.done'))->toBeTrue()
+            ->and(json_decode((string) file_get_contents($startedMarker.'.result'), true))->toMatchArray([
+                'createdRows' => 0,
+                'duplicateRows' => 1,
+            ])
+            ->and(Contact::query()->where('organization_id', $organization->id)->count())->toBe(1)
+            ->and(DB::table('company_contacts')->where('organization_id', $organization->id)->count())->toBe(1);
+    } finally {
+        if (DB::transactionLevel() > 0) {
+            DB::rollBack();
+        }
+
+        if ($worker?->isRunning()) {
+            $worker->stop();
+        }
+
+        @unlink($startedMarker);
+        @unlink($startedMarker.'.started');
+        @unlink($startedMarker.'.done');
+        @unlink($startedMarker.'.result');
+        DB::table('organizations')->where('id', $organization->id)->delete();
+        DB::table('users')->where('id', $owner->id)->delete();
+        DB::connection()->beginTransaction();
+    }
+});
 
 it('serializes a concurrent team deactivation with PostgreSQL import confirmation checks', function () {
     if (DB::connection()->getDriverName() !== 'pgsql') {

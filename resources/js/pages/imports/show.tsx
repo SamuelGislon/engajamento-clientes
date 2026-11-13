@@ -56,9 +56,11 @@ type ImportRecord = {
 type DuplicateCandidate = {
     id: number;
     name: string;
-    city: string | null;
-    state: string | null;
-    tax_id_masked: string | null;
+    city?: string | null;
+    state?: string | null;
+    tax_id_masked?: string | null;
+    email_masked?: string | null;
+    phone_masked?: string | null;
 };
 type ImportValidationError = {
     line: number;
@@ -66,6 +68,7 @@ type ImportValidationError = {
     message: string;
     candidates?: DuplicateCandidate[];
     can_create?: boolean;
+    lines?: number[];
 };
 
 type FieldOption = { label: string; required: boolean };
@@ -128,6 +131,35 @@ export default function ImportShow({
                 }),
         ),
     });
+    useEffect(() => {
+        resolutionForm.setData(
+            'resolutions',
+            Object.fromEntries(
+                importRecord.validation_errors
+                    .filter((error) => error.type === 'duplicate')
+                    .map((error) => {
+                        const saved =
+                            importRecord.duplicate_resolutions[
+                                String(error.line)
+                            ];
+
+                        return [
+                            String(error.line),
+                            {
+                                action: saved?.action ?? 'ignore',
+                                ...(saved?.target_id !== undefined
+                                    ? { target_id: String(saved.target_id) }
+                                    : {}),
+                            },
+                        ];
+                    }),
+            ),
+        );
+    }, [
+        importRecord.duplicate_resolutions,
+        importRecord.validation_errors,
+        resolutionForm.setData,
+    ]);
     const isQueueActive =
         importRecord.status === 'queued' ||
         importRecord.status === 'processing';
@@ -731,18 +763,22 @@ export default function ImportShow({
                                 )}
                             </div>
                         )}
-                        {importRecord.record_type === 'companies' &&
+                        {['companies', 'contacts'].includes(
+                            importRecord.record_type,
+                        ) &&
                             duplicateErrors.length > 0 && (
                                 <div className="mt-5 rounded-xl border border-border/70 p-4">
                                     <h3 className="font-medium">
-                                        Decisões para empresas duplicadas
+                                        {importRecord.record_type ===
+                                        'companies'
+                                            ? 'Decisões para empresas duplicadas'
+                                            : 'Decisões para contatos duplicados'}
                                     </h3>
                                     <p className="mt-1 text-sm text-muted-foreground">
-                                        Escolha uma ação para cada linha.
-                                        Atualizações alteram apenas campos
-                                        preenchidos no mapeamento e preservam
-                                        proprietário, equipe e campos não
-                                        enviados.
+                                        Escolha uma ação para cada pessoa ou
+                                        empresa. Atualizações alteram somente
+                                        campos preenchidos no mapeamento;
+                                        vínculos existentes são preservados.
                                     </p>
                                     <div className="mt-4 grid gap-3">
                                         {duplicateErrors.map((error) => {
@@ -761,7 +797,11 @@ export default function ImportShow({
                                                 >
                                                     <div>
                                                         <p className="text-sm font-medium">
-                                                            Linha {error.line}
+                                                            {error.lines &&
+                                                            error.lines.length >
+                                                                1
+                                                                ? `Linhas ${error.lines.join(', ')}`
+                                                                : `Linha ${error.line}`}
                                                         </p>
                                                         <p className="mt-1 text-sm text-muted-foreground">
                                                             {candidates.length >
@@ -778,7 +818,11 @@ export default function ImportShow({
                                                                                   `Registro #${candidate.id}`,
                                                                                   candidate.tax_id_masked
                                                                                       ? `CNPJ ${candidate.tax_id_masked}`
-                                                                                      : null,
+                                                                                      : candidate.email_masked
+                                                                                        ? `E-mail ${candidate.email_masked}`
+                                                                                        : candidate.phone_masked
+                                                                                          ? `Telefone ${candidate.phone_masked}`
+                                                                                          : null,
                                                                               ]
                                                                                   .filter(
                                                                                       Boolean,
@@ -790,7 +834,7 @@ export default function ImportShow({
                                                                       .join(
                                                                           ' / ',
                                                                       )
-                                                                : 'A linha repete uma empresa do próprio arquivo.'}
+                                                                : 'Não há um registro correspondente visível nesta revisão.'}
                                                         </p>
                                                     </div>
                                                     <div className="grid gap-2">
@@ -841,7 +885,7 @@ export default function ImportShow({
                                                         {resolution.action ===
                                                             'resolve' && (
                                                             <select
-                                                                aria-label={`Empresa de destino da linha ${error.line}`}
+                                                                aria-label={`${importRecord.record_type === 'companies' ? 'Empresa' : 'Contato'} correspondente à linha ${error.line}`}
                                                                 value={
                                                                     resolution.target_id ??
                                                                     ''
@@ -867,8 +911,8 @@ export default function ImportShow({
                                                                 className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                                                             >
                                                                 <option value="">
-                                                                    Selecione a
-                                                                    empresa
+                                                                    Selecione o
+                                                                    registro
                                                                 </option>
                                                                 {candidates.map(
                                                                     (
@@ -894,6 +938,12 @@ export default function ImportShow({
                                                                                 : ''}
                                                                             {candidate.tax_id_masked
                                                                                 ? ` · CNPJ ${candidate.tax_id_masked}`
+                                                                                : ''}
+                                                                            {candidate.email_masked
+                                                                                ? ` · E-mail ${candidate.email_masked}`
+                                                                                : ''}
+                                                                            {candidate.phone_masked
+                                                                                ? ` · Telefone ${candidate.phone_masked}`
                                                                                 : ''}
                                                                         </option>
                                                                     ),

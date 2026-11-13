@@ -21,11 +21,13 @@ use App\Http\Requests\SaveDataImportResolutionsRequest;
 use App\Http\Requests\StoreDataImportRequest;
 use App\Jobs\ProcessDataImportChunk;
 use App\Models\Company;
+use App\Models\Contact;
 use App\Models\DataImport;
 use App\Models\JourneyTemplate;
 use App\Models\Organization;
 use App\Models\Team;
 use App\Models\User;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -47,30 +49,36 @@ class DataImportController extends Controller
         $organizationId = app(TenantContext::class)->id();
         $role = $user->roleIn($organizationId);
         $canViewAll = in_array($role, ['owner', 'admin'], true);
+        $imports = DataImport::query()
+            ->with('creator:id,name')
+            ->when(! $canViewAll, fn ($imports) => $imports->where('created_by', $user->id))
+            ->latest()
+            ->paginate(15);
+        $hiddenDuplicateRows = $this->hiddenDuplicateRowsForImports($imports->getCollection(), $user, $canViewAll);
 
         return Inertia::render('imports/index', [
-            'imports' => DataImport::query()
-                ->with('creator:id,name')
-                ->when(! $canViewAll, fn ($imports) => $imports->where('created_by', $user->id))
-                ->latest()
-                ->paginate(15)
-                ->through(fn (DataImport $dataImport): array => [
-                    'id' => $dataImport->id,
-                    'record_type' => $dataImport->record_type,
-                    'status' => $dataImport->status,
-                    'original_filename' => $dataImport->original_filename,
-                    'journey_mode' => $dataImport->journey_mode,
-                    'total_rows' => $dataImport->total_rows,
-                    'valid_rows' => $dataImport->valid_rows,
-                    'processed_rows' => $dataImport->processed_rows,
-                    'invalid_rows' => $dataImport->invalid_rows,
-                    'created_rows' => $dataImport->created_rows,
-                    'updated_rows' => $dataImport->updated_rows,
-                    'skipped_rows' => $dataImport->skipped_rows,
-                    'duplicate_rows' => $dataImport->duplicate_rows,
-                    'expires_at' => $dataImport->expires_at->toIso8601String(),
-                    'creator' => $dataImport->creator?->only(['id', 'name']),
-                ]),
+            'imports' => $imports
+                ->through(function (DataImport $dataImport) use ($hiddenDuplicateRows): array {
+                    $hiddenRows = $hiddenDuplicateRows[$dataImport->id] ?? 0;
+
+                    return [
+                        'id' => $dataImport->id,
+                        'record_type' => $dataImport->record_type,
+                        'status' => $dataImport->status,
+                        'original_filename' => $dataImport->original_filename,
+                        'journey_mode' => $dataImport->journey_mode,
+                        'total_rows' => $dataImport->total_rows,
+                        'valid_rows' => $dataImport->valid_rows,
+                        'processed_rows' => $dataImport->processed_rows,
+                        'invalid_rows' => $dataImport->invalid_rows + $hiddenRows,
+                        'created_rows' => $dataImport->created_rows,
+                        'updated_rows' => $dataImport->updated_rows,
+                        'skipped_rows' => $dataImport->skipped_rows,
+                        'duplicate_rows' => max(0, $dataImport->duplicate_rows - $hiddenRows),
+                        'expires_at' => $dataImport->expires_at->toIso8601String(),
+                        'creator' => $dataImport->creator?->only(['id', 'name']),
+                    ];
+                }),
             'role' => $role,
             'teams' => Team::query()
                 ->where('status', 'active')
@@ -138,10 +146,13 @@ class DataImportController extends Controller
         $record = DataImport::query()->findOrFail($dataImport);
         Gate::authorize('view', $record);
 
-        $validationErrors = $this->visibleValidationErrors($record, $request->user());
-        $duplicateResolutions = $this->visibleDuplicateResolutions($record, $validationErrors);
-
+        $actor = $request->user();
         $organizationId = app(TenantContext::class)->id();
+        $isOrganizationAdministrator = in_array($actor->roleIn($organizationId), ['owner', 'admin'], true);
+        $validationErrors = $this->visibleValidationErrors($record, $actor);
+        $duplicateResolutions = $this->visibleDuplicateResolutions($record, $validationErrors);
+        $hiddenDuplicateRows = $this->hiddenDuplicateRows($record, $actor, $isOrganizationAdministrator, $validationErrors);
+
         $expectedPathPrefix = 'imports/'.$organizationId.'/';
 
         $preview = null;
@@ -174,8 +185,8 @@ class DataImportController extends Controller
                 'valid_rows' => $record->valid_rows,
                 'processed_rows' => $record->processed_rows,
                 'last_error' => $record->last_error,
-                'invalid_rows' => $record->invalid_rows,
-                'duplicate_rows' => $record->duplicate_rows,
+                'invalid_rows' => $record->invalid_rows + $hiddenDuplicateRows,
+                'duplicate_rows' => max(0, $record->duplicate_rows - $hiddenDuplicateRows),
                 'created_rows' => $record->created_rows,
                 'updated_rows' => $record->updated_rows,
                 'skipped_rows' => $record->skipped_rows,
@@ -300,11 +311,11 @@ class DataImportController extends Controller
             $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
             Gate::forUser($request->user())->authorize('update', $batch);
 
-            if ($batch->status !== 'validated' || $batch->record_type !== 'companies') {
+            if ($batch->status !== 'validated' || ! in_array($batch->record_type, ['companies', 'contacts'], true)) {
                 throw ValidationException::withMessages(['resolutions' => 'As decisões de duplicidade não podem mais ser alteradas neste lote.']);
             }
 
-            $duplicateErrors = collect($batch->validation_errors ?? [])
+            $duplicateErrors = collect($this->visibleValidationErrors($batch, $request->user()))
                 ->filter(fn (array $error): bool => $error['type'] === 'duplicate')
                 ->keyBy(fn (array $error): string => (string) $error['line']);
             $resolutions = [];
@@ -313,6 +324,21 @@ class DataImportController extends Controller
                 $error = $duplicateErrors->get((string) $line);
 
                 if ($error === null) {
+                    $storedResolution = ($batch->duplicate_resolutions ?? [])[$line]
+                        ?? ($batch->duplicate_resolutions ?? [])[(string) $line]
+                        ?? null;
+                    $storedAction = is_array($storedResolution) ? $storedResolution['action'] : null;
+                    $storedTargetId = is_array($storedResolution) && is_int($storedResolution['target_id'] ?? null)
+                        ? $storedResolution['target_id']
+                        : null;
+                    $requestedTargetId = isset($resolution['target_id']) ? (int) $resolution['target_id'] : null;
+                    $sameSavedDecision = $storedAction === $resolution['action']
+                        && ($resolution['action'] === 'update' || $storedTargetId === $requestedTargetId);
+
+                    if ($sameSavedDecision) {
+                        continue;
+                    }
+
                     throw ValidationException::withMessages(['resolutions' => 'Uma das linhas selecionadas não está mais marcada como duplicada. Valide o arquivo novamente.']);
                 }
 
@@ -733,12 +759,12 @@ class DataImportController extends Controller
         }
     }
 
-    /** @return list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}> */
+    /** @return list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, lines?: list<int>}> */
     private function visibleValidationErrors(DataImport $record, User $actor): array
     {
         $errors = $record->validation_errors ?? [];
 
-        if ($record->record_type !== 'companies') {
+        if (! in_array($record->record_type, ['companies', 'contacts'], true)) {
             return $errors;
         }
 
@@ -749,6 +775,44 @@ class DataImportController extends Controller
             ->unique()
             ->values()
             ->all();
+        if ($record->record_type === 'contacts') {
+            $visibleContacts = Contact::query()
+                ->where('organization_id', $record->organization_id)
+                ->visibleTo($actor)
+                ->whereKey($candidateIds)
+                ->get(['id', 'name', 'email', 'phone'])
+                ->keyBy('id');
+
+            return array_map(function (array $error) use ($visibleContacts): array {
+                if ($error['type'] !== 'duplicate') {
+                    return $error;
+                }
+
+                $candidates = array_values(array_filter(array_map(function (array $candidate) use ($visibleContacts): ?array {
+                    $contact = $visibleContacts->get((int) $candidate['id']);
+
+                    if (! $contact instanceof Contact) {
+                        return null;
+                    }
+
+                    return [
+                        'id' => $contact->id,
+                        'name' => $contact->name,
+                        'email_masked' => $this->maskEmail($contact->email),
+                        'phone_masked' => $this->maskPhone($contact->phone),
+                    ];
+                }, $error['candidates'] ?? []), static fn (?array $candidate): bool => $candidate !== null));
+
+                if ($candidates === []) {
+                    return $this->inaccessibleDuplicateError($error);
+                }
+
+                $error['candidates'] = $candidates;
+
+                return $error;
+            }, $errors);
+        }
+
         $visibleCompanies = Company::query()
             ->where('organization_id', $record->organization_id)
             ->visibleTo($actor)
@@ -757,13 +821,13 @@ class DataImportController extends Controller
             ->keyBy('id');
 
         return array_map(function (array $error) use ($visibleCompanies): array {
-            if ($error['type'] !== 'duplicate' || ! isset($error['candidates'])) {
+            if ($error['type'] !== 'duplicate') {
                 return $error;
             }
 
             $visibleCandidates = [];
 
-            foreach ($error['candidates'] as $candidate) {
+            foreach ($error['candidates'] ?? [] as $candidate) {
                 $company = $visibleCompanies->get($candidate['id']);
 
                 if ($company instanceof Company) {
@@ -777,6 +841,10 @@ class DataImportController extends Controller
                 }
             }
 
+            if ($visibleCandidates === []) {
+                return $this->inaccessibleDuplicateError($error);
+            }
+
             $error['candidates'] = $visibleCandidates;
 
             return $error;
@@ -784,7 +852,147 @@ class DataImportController extends Controller
     }
 
     /**
-     * @param  list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>, can_create?: bool}>  $validationErrors
+     * @param  list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, lines?: list<int>}>  $visibleErrors
+     */
+    private function hiddenDuplicateRows(
+        DataImport $record,
+        User $actor,
+        bool $isOrganizationAdministrator,
+        array $visibleErrors,
+    ): int {
+        if (! in_array($record->record_type, ['companies', 'contacts'], true)) {
+            return 0;
+        }
+
+        $visibleErrorsByLine = collect($visibleErrors)->keyBy('line');
+        $duplicateErrors = collect($record->validation_errors ?? [])
+            ->filter(fn (array $error): bool => $error['type'] === 'duplicate');
+        $representedDuplicateRows = $duplicateErrors
+            ->sum(fn (array $error): int => count($error['lines'] ?? [$error['line']]));
+        $hiddenDuplicateRows = $duplicateErrors
+            ->sum(function (array $error) use ($visibleErrorsByLine): int {
+                $visibleError = $visibleErrorsByLine->get($error['line']);
+
+                if (($visibleError['type'] ?? null) !== 'invalid') {
+                    return 0;
+                }
+
+                return count($error['lines'] ?? [$error['line']]);
+            });
+
+        return $hiddenDuplicateRows + $this->unrepresentedDuplicateRows($record, $isOrganizationAdministrator, $representedDuplicateRows);
+    }
+
+    /**
+     * @param  EloquentCollection<int, DataImport>  $imports
+     * @return array<int, int>
+     */
+    private function hiddenDuplicateRowsForImports(
+        EloquentCollection $imports,
+        User $actor,
+        bool $isOrganizationAdministrator,
+    ): array {
+        $candidateIds = ['companies' => [], 'contacts' => []];
+
+        foreach ($imports as $record) {
+            if (! array_key_exists($record->record_type, $candidateIds)) {
+                continue;
+            }
+
+            foreach ($record->validation_errors ?? [] as $error) {
+                if ($error['type'] !== 'duplicate') {
+                    continue;
+                }
+
+                foreach ($error['candidates'] ?? [] as $candidate) {
+                    $candidateIds[$record->record_type][] = (int) $candidate['id'];
+                }
+            }
+        }
+
+        $organizationId = app(TenantContext::class)->id();
+        $visibleIds = [
+            'companies' => $candidateIds['companies'] === []
+                ? []
+                : Company::query()
+                    ->where('organization_id', $organizationId)
+                    ->visibleTo($actor)
+                    ->whereKey(array_unique($candidateIds['companies']))
+                    ->pluck('id')
+                    ->map(static fn (int|string $id): int => (int) $id)
+                    ->all(),
+            'contacts' => $candidateIds['contacts'] === []
+                ? []
+                : Contact::query()
+                    ->where('organization_id', $organizationId)
+                    ->visibleTo($actor)
+                    ->whereKey(array_unique($candidateIds['contacts']))
+                    ->pluck('id')
+                    ->map(static fn (int|string $id): int => (int) $id)
+                    ->all(),
+        ];
+        $visibleLookup = [
+            'companies' => array_fill_keys($visibleIds['companies'], true),
+            'contacts' => array_fill_keys($visibleIds['contacts'], true),
+        ];
+        $hiddenRows = [];
+
+        foreach ($imports as $record) {
+            if (! array_key_exists($record->record_type, $visibleLookup)) {
+                continue;
+            }
+
+            $visibleCandidates = $visibleLookup[$record->record_type];
+            $duplicateErrors = collect($record->validation_errors ?? [])
+                ->filter(fn (array $error): bool => $error['type'] === 'duplicate')
+                ->values();
+            $representedDuplicateRows = $duplicateErrors
+                ->sum(fn (array $error): int => count($error['lines'] ?? [$error['line']]));
+            $hiddenCount = $duplicateErrors
+                ->sum(function (array $error) use ($visibleCandidates): int {
+                    foreach ($error['candidates'] ?? [] as $candidate) {
+                        if (isset($visibleCandidates[(int) $candidate['id']])) {
+                            return 0;
+                        }
+                    }
+
+                    return count($error['lines'] ?? [$error['line']]);
+                }) + $this->unrepresentedDuplicateRows($record, $isOrganizationAdministrator, $representedDuplicateRows);
+
+            if ($hiddenCount > 0) {
+                $hiddenRows[$record->id] = (int) $hiddenCount;
+            }
+        }
+
+        return $hiddenRows;
+    }
+
+    private function unrepresentedDuplicateRows(
+        DataImport $record,
+        bool $isOrganizationAdministrator,
+        int $representedDuplicateRows,
+    ): int {
+        if ($isOrganizationAdministrator || count($record->validation_errors ?? []) < DataImport::MAX_VALIDATION_ERRORS) {
+            return 0;
+        }
+
+        return max(0, $record->duplicate_rows - $representedDuplicateRows);
+    }
+
+    /** @param array<string, mixed> $error
+     * @return array{line: int, type: string, message: string}
+     */
+    private function inaccessibleDuplicateError(array $error): array
+    {
+        return [
+            'line' => $error['line'],
+            'type' => 'invalid',
+            'message' => 'A linha não pode ser importada no escopo de acesso atual.',
+        ];
+    }
+
+    /**
+     * @param  list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, lines?: list<int>}>  $validationErrors
      * @return array<int|string, array{action: string, target_id?: int}>
      */
     private function visibleDuplicateResolutions(DataImport $record, array $validationErrors): array
@@ -832,5 +1040,27 @@ class DataImportController extends Controller
         }
 
         return substr($digits, 0, 2).'.***.***/****-'.substr($digits, -2);
+    }
+
+    private function maskEmail(?string $email): ?string
+    {
+        if ($email === null || ! str_contains($email, '@')) {
+            return null;
+        }
+
+        [$local, $domain] = explode('@', $email, 2);
+
+        if ($local === '') {
+            return null;
+        }
+
+        return mb_substr($local, 0, 1).'***'.(mb_strlen($local) > 1 ? mb_substr($local, -1) : '').'@'.$domain;
+    }
+
+    private function maskPhone(?string $phone): ?string
+    {
+        $digits = preg_replace('/\D+/', '', $phone ?? '') ?? '';
+
+        return strlen($digits) < 4 ? null : '***'.substr($digits, -4);
     }
 }

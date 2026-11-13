@@ -176,6 +176,63 @@ test('owner imports one contact linked to multiple existing companies', async ({
     await expect(page.getByText(contactName, { exact: true })).toBeVisible();
 });
 
+test('owner explicitly updates a visible contact duplicate', async ({
+    page,
+}) => {
+    test.setTimeout(90_000);
+    const updatedName = 'Marina Souza Atualizada E2E';
+
+    await signIn(page, 'owner@example.test');
+    await page.goto('/imports');
+    await page
+        .getByLabel('O que você está importando?')
+        .selectOption('contacts');
+    await page.getByLabel('Arquivo CSV ou Excel').setInputFiles({
+        name: 'contact-update.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from(
+            [
+                'Name,Email,Phone,Job title,Company name,Company roles,Is primary',
+                `${updatedName},marina@example.test,555-1234,Diretora,Escritório Horizonte,decision_maker,sim`,
+            ].join('\n'),
+        ),
+    });
+    await page.getByRole('button', { name: 'Enviar para prévia' }).click();
+    await page.getByRole('link', { name: 'contact-update.csv' }).click();
+    await page.getByLabel('Nome completo').selectOption('0');
+    await page.getByLabel('E-mail').selectOption('1');
+    await page.getByLabel('Telefone').selectOption('2');
+    await page.getByLabel('Cargo ou função').selectOption('3');
+    await page.getByLabel('Nome da empresa').selectOption('4');
+    await page.getByLabel('Papéis na empresa (; separados)').selectOption('5');
+    await page.getByLabel('Contato principal (sim/não)').selectOption('6');
+    await page.getByRole('button', { name: 'Salvar mapeamento' }).click();
+    await page.getByRole('button', { name: 'Validar todas as linhas' }).click();
+
+    await expect(
+        page.getByRole('heading', {
+            name: 'Decisões para contatos duplicados',
+        }),
+    ).toBeVisible();
+    await expect(page.getByText('E-mail m***a@example.test')).toBeVisible();
+    await page.getByLabel('Ação', { exact: true }).selectOption('update');
+    await page
+        .getByRole('button', { name: 'Salvar decisões e revalidar' })
+        .click();
+    await expect(
+        page.getByRole('button', { name: 'Confirmar importação' }),
+    ).toBeEnabled({ timeout: 30_000 });
+
+    await page.getByRole('button', { name: 'Confirmar importação' }).click();
+    await expect(
+        page.getByRole('heading', { name: 'Resultado da importação' }),
+    ).toBeVisible();
+    await expect(page.getByText('Atualizadas')).toBeVisible();
+
+    await page.goto('/contacts');
+    await expect(page.getByText(updatedName, { exact: true })).toBeVisible();
+});
+
 test('owner imports a historical sale with an authorized seller', async ({
     page,
 }) => {
@@ -307,5 +364,5 @@ async function signIn(
     await page.getByLabel('Email address').fill(email);
     await page.getByLabel('Password', { exact: true }).fill('password');
     await page.getByRole('button', { name: 'Log in' }).click();
-    await expect(page).toHaveURL(/dashboard/);
+    await expect(page).toHaveURL(/dashboard/, { timeout: 20_000 });
 }

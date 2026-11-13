@@ -2,9 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Domain\Commercial\CustomerScoreService;
 use App\Domain\Imports\CompanyImportService;
+use App\Domain\Imports\ContactImportService;
 use App\Domain\Imports\DataImportProcessor;
 use App\Domain\Imports\SpreadsheetPreviewReader;
+use App\Domain\Journeys\JourneyService;
 use App\Domain\Tenancy\TenantContext;
 use App\Jobs\ProcessDataImportChunk;
 use App\Models\Company;
@@ -28,6 +31,77 @@ use Tests\TestCase;
 class DataImportTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_contact_import_does_not_show_an_ignorable_duplicate_for_an_identical_repeated_link(): void
+    {
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->create(['organization_id' => $organization->id, 'name' => 'Escritório Igual']);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'record_type' => 'contacts',
+            'status' => 'mapped',
+            'mapping' => [
+                'name' => 0,
+                'email' => 1,
+                'phone' => 2,
+                'company_name' => 3,
+                'company_roles' => 4,
+                'relationship_notes' => 5,
+            ],
+        ]);
+
+        $analysis = app(ContactImportService::class)->analyze($batch, $owner, [
+            ['Ana Silva', 'ana.igual@example.test', '+5511999994444', $company->name, 'buyer', 'Compras'],
+            ['Ana Silva', 'ana.igual@example.test', '+5511999994444', $company->name, 'buyer', 'Compras'],
+        ], 2);
+
+        $this->assertCount(1, $analysis['validRows']);
+        $this->assertSame(1, $analysis['duplicateRows']);
+        $this->assertSame([], $analysis['errors']);
+    }
+
+    public function test_contact_import_includes_visible_candidates_for_duplicates_found_at_write_time(): void
+    {
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->create(['organization_id' => $organization->id]);
+        $contact = Contact::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Ana Silva',
+            'email' => 'ana.race@example.test',
+            'phone' => '+55 11 99999-1000',
+        ]);
+        $company->contacts()->attach($contact->id, [
+            'organization_id' => $organization->id,
+            'roles' => ['buyer'],
+            'is_primary' => false,
+        ]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'record_type' => 'contacts',
+            'status' => 'validated',
+        ]);
+
+        $result = app(ContactImportService::class)->import($batch, $owner, [[
+            'line' => 2,
+            'identity' => 'email:ana.race@example.test',
+            'attributes' => ['name' => 'Ana Silva', 'email' => 'ana.race@example.test', 'status' => 'active'],
+            'company_id' => $company->id,
+            'roles' => ['buyer'],
+            'is_primary' => false,
+            'relationship_notes' => null,
+        ]]);
+
+        $this->assertSame(1, $result['duplicateRows']);
+        $this->assertSame([$contact->id], array_column($result['errors'][0]['candidates'], 'id'));
+    }
 
     public function test_contact_import_deduplicates_a_person_and_links_them_to_multiple_companies(): void
     {
@@ -221,6 +295,364 @@ class DataImportTest extends TestCase
         $this->assertDatabaseHas('contacts', ['id' => $contact->id, 'name' => 'Nome Original', 'job_title' => 'Cargo original']);
     }
 
+    public function test_contact_import_can_update_a_visible_duplicate_and_add_company_links(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $existingCompany = Company::factory()->create(['organization_id' => $organization->id, 'name' => 'Escritório Anterior']);
+        $newCompany = Company::factory()->create(['organization_id' => $organization->id, 'name' => 'Escritório Novo']);
+        $secondNewCompany = Company::factory()->create(['organization_id' => $organization->id, 'name' => 'Escritório Alternativo']);
+        $contact = Contact::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Ana Silva',
+            'email' => 'ana.silva@example.test',
+            'phone' => '+5511999990000',
+            'job_title' => 'Cargo original',
+        ]);
+        $existingCompany->contacts()->attach($contact->id, [
+            'organization_id' => $organization->id,
+            'roles' => ['owner'],
+            'is_primary' => true,
+            'notes' => 'Vínculo original preservado',
+        ]);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'contacts',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent(
+                'contacts.csv',
+                "Name,Email,Phone,Job title,Company name,Company roles,Relationship notes\nAna Silva Atualizada,ana.silva@example.test,+5511999990000,Diretora,Escritório Novo,buyer,Responsável por compras\nAna Silva Atualizada,ana.silva@example.test,+5511999990000,Diretora,Escritório Alternativo,specifier,Responsável técnico\n",
+            ),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'email' => '1', 'phone' => '2', 'job_title' => '3', 'company_name' => '4', 'company_roles' => '5', 'relationship_notes' => '6'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+
+        $duplicateError = DataImport::query()->findOrFail($importId)->validation_errors[0];
+        $this->assertSame('duplicate', $duplicateError['type']);
+        $this->assertSame([$contact->id], array_column($duplicateError['candidates'], 'id'));
+        $this->assertSame('a***a@example.test', $duplicateError['candidates'][0]['email_masked']);
+        $this->assertSame([2, 3], $duplicateError['lines']);
+        $this->assertStringNotContainsString('ana.silva@example.test', json_encode($duplicateError));
+
+        $this->actingAs($owner)->withSession($session)->get('/imports/'.$importId)
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('imports/show')
+                ->where('import.validation_errors.0.candidates.0.email_masked', 'a***a@example.test')
+                ->missing('import.validation_errors.0.candidates.0.email'));
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/resolutions', [
+            'resolutions' => ['2' => ['action' => 'update']],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'valid_rows' => 2, 'duplicate_rows' => 0]);
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $this->assertDatabaseHas('contacts', [
+            'id' => $contact->id,
+            'name' => 'Ana Silva Atualizada',
+            'job_title' => 'Diretora',
+        ]);
+        $this->assertDatabaseHas('company_contacts', [
+            'organization_id' => $organization->id,
+            'company_id' => $existingCompany->id,
+            'contact_id' => $contact->id,
+            'is_primary' => true,
+            'notes' => 'Vínculo original preservado',
+        ]);
+        $this->assertDatabaseHas('company_contacts', [
+            'organization_id' => $organization->id,
+            'company_id' => $newCompany->id,
+            'contact_id' => $contact->id,
+            'is_primary' => false,
+            'notes' => 'Responsável por compras',
+        ]);
+        $this->assertDatabaseHas('company_contacts', [
+            'organization_id' => $organization->id,
+            'company_id' => $secondNewCompany->id,
+            'contact_id' => $contact->id,
+            'is_primary' => false,
+            'notes' => 'Responsável técnico',
+        ]);
+        $this->assertSame(['owner'], json_decode((string) DB::table('company_contacts')
+            ->where('company_id', $existingCompany->id)
+            ->where('contact_id', $contact->id)
+            ->value('roles'), true));
+        $this->assertSame(['buyer'], json_decode((string) DB::table('company_contacts')
+            ->where('company_id', $newCompany->id)
+            ->where('contact_id', $contact->id)
+            ->value('roles'), true));
+        $this->assertSame(['specifier'], json_decode((string) DB::table('company_contacts')
+            ->where('company_id', $secondNewCompany->id)
+            ->where('contact_id', $contact->id)
+            ->value('roles'), true));
+        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'created_rows' => 0, 'updated_rows' => 1]);
+        $this->assertDatabaseCount('contacts', 1);
+    }
+
+    public function test_contact_update_resolution_does_not_switch_to_a_different_matching_contact(): void
+    {
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->create(['organization_id' => $organization->id]);
+        $selectedContact = Contact::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Contato escolhido',
+            'email' => 'contato-escolhido@example.test',
+        ]);
+        $replacementContact = Contact::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Outro contato',
+            'email' => 'outro-email@example.test',
+        ]);
+        $company->contacts()->attach($selectedContact->id, ['organization_id' => $organization->id, 'roles' => ['buyer']]);
+        $company->contacts()->attach($replacementContact->id, ['organization_id' => $organization->id, 'roles' => ['specifier']]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'record_type' => 'contacts',
+            'mapping' => ['name' => 0, 'email' => 1, 'company_name' => 2],
+            'duplicate_resolutions' => ['2' => ['action' => 'update', 'target_id' => $selectedContact->id]],
+        ]);
+
+        $selectedContact->update(['email' => 'contato-antigo@example.test']);
+        $replacementContact->update(['email' => 'contato-escolhido@example.test']);
+        $analysis = app(ContactImportService::class)->analyze($batch, $owner, [[
+            'Contato importado',
+            'contato-escolhido@example.test',
+            $company->name,
+        ]], 1);
+
+        $this->assertSame([], $analysis['validRows']);
+        $this->assertSame(1, $analysis['duplicateRows']);
+        $this->assertSame([$replacementContact->id], array_column($analysis['errors'][0]['candidates'], 'id'));
+        $this->assertDatabaseHas('contacts', ['id' => $replacementContact->id, 'name' => 'Outro contato']);
+    }
+
+    public function test_contact_duplicate_decisions_can_be_saved_across_batches_of_one_hundred_rows(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->create(['organization_id' => $organization->id, 'name' => 'Escritório da carteira']);
+        $csvRows = ['Name,Email,Company name'];
+
+        for ($index = 1; $index <= 101; $index++) {
+            $name = 'Contato duplicado '.$index;
+            $email = sprintf('contato%03d@example.test', $index);
+            $contact = Contact::factory()->create([
+                'organization_id' => $organization->id,
+                'name' => $name,
+                'email' => $email,
+            ]);
+            $company->contacts()->attach($contact->id, [
+                'organization_id' => $organization->id,
+                'roles' => ['buyer'],
+                'is_primary' => false,
+            ]);
+            $csvRows[] = $name.','.$email.','.$company->name;
+        }
+
+        $session = ['active_organization_id' => $organization->id];
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'contacts',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('contacts.csv', implode("\n", $csvRows)),
+        ])->assertRedirect('/imports');
+        $importId = (int) DB::table('data_imports')->value('id');
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'email' => '1', 'company_name' => '2'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $firstErrors = DataImport::query()->findOrFail($importId)->validation_errors;
+        $this->assertCount(100, $firstErrors);
+
+        $firstDecisions = [];
+        foreach ($firstErrors as $error) {
+            $firstDecisions[(string) $error['line']] = ['action' => 'ignore'];
+        }
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/resolutions', [
+            'resolutions' => $firstDecisions,
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->assertSame([102], array_column(DataImport::query()->findOrFail($importId)->validation_errors, 'line'));
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/resolutions', [
+            'resolutions' => ['102' => ['action' => 'ignore']],
+        ])->assertRedirect('/imports/'.$importId);
+        $nextBatch = DataImport::query()->findOrFail($importId);
+        $this->assertSame('ignore', $nextBatch->duplicate_resolutions['2']['action']);
+        $this->assertSame('ignore', $nextBatch->duplicate_resolutions['102']['action']);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+
+        $this->assertSame([], DataImport::query()->findOrFail($importId)->validation_errors);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $importId,
+            'status' => 'completed',
+            'duplicate_rows' => 101,
+            'created_rows' => 0,
+            'updated_rows' => 0,
+        ]);
+        $this->assertDatabaseCount('contacts', 101);
+    }
+
+    public function test_contact_import_can_create_a_separate_record_when_a_duplicate_is_visible(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->create(['organization_id' => $organization->id, 'name' => 'Escritório Horizonte']);
+        $existingContact = Contact::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Ana Silva',
+            'email' => 'ana.silva@example.test',
+        ]);
+        $existingCompany = Company::factory()->create(['organization_id' => $organization->id]);
+        $existingCompany->contacts()->attach($existingContact->id, [
+            'organization_id' => $organization->id,
+            'roles' => ['buyer'],
+            'is_primary' => false,
+        ]);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'contacts',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent(
+                'contacts.csv',
+                "Name,Email,Company name\nAna Silva,ana.silva@example.test,Escritório Horizonte\n",
+            ),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'email' => '1', 'company_name' => '2'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->assertTrue(DataImport::query()->findOrFail($importId)->validation_errors[0]['can_create']);
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/resolutions', [
+            'resolutions' => ['2' => ['action' => 'create']],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $this->assertDatabaseCount('contacts', 2);
+        $this->assertDatabaseHas('contacts', ['id' => $existingContact->id, 'name' => 'Ana Silva']);
+        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'created_rows' => 1, 'updated_rows' => 0]);
+        $this->assertDatabaseHas('company_contacts', [
+            'company_id' => $company->id,
+            'contact_id' => DB::table('contacts')->where('id', '!=', $existingContact->id)->value('id'),
+        ]);
+    }
+
+    public function test_contact_import_manually_resolves_ambiguity_without_merging_contacts(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $destinationCompany = Company::factory()->create(['organization_id' => $organization->id, 'name' => 'Escritório Destino']);
+        $firstCompany = Company::factory()->create(['organization_id' => $organization->id]);
+        $secondCompany = Company::factory()->create(['organization_id' => $organization->id]);
+        $firstContact = Contact::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Ana Silva',
+            'email' => 'ana.silva@example.test',
+            'job_title' => 'Arquiteta',
+        ]);
+        $secondContact = Contact::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Ana S. Silva',
+            'email' => 'ana.silva@example.test',
+            'job_title' => 'Compradora',
+        ]);
+        $firstCompany->contacts()->attach($firstContact->id, ['organization_id' => $organization->id, 'roles' => ['specifier']]);
+        $secondCompany->contacts()->attach($secondContact->id, ['organization_id' => $organization->id, 'roles' => ['buyer']]);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'contacts',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent(
+                'contacts.csv',
+                "Name,Email,Job title,Company name,Company roles\nAna Silva Atualizada,ana.silva@example.test,Diretora,Escritório Destino,buyer\n",
+            ),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'email' => '1', 'job_title' => '2', 'company_name' => '3', 'company_roles' => '4'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $duplicateError = DataImport::query()->findOrFail($importId)->validation_errors[0];
+        $candidateIds = array_column($duplicateError['candidates'], 'id');
+        $this->assertCount(2, $candidateIds);
+        $this->assertStringNotContainsString('ana.silva@example.test', json_encode($duplicateError));
+
+        $foreignOrganization = Organization::factory()->create();
+        app(TenantContext::class)->set($foreignOrganization);
+        $foreignContact = Contact::factory()->create(['organization_id' => $foreignOrganization->id, 'email' => 'ana.silva@example.test']);
+        app(TenantContext::class)->set($organization);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/resolutions', [
+            'resolutions' => ['2' => ['action' => 'resolve', 'target_id' => $foreignContact->id]],
+        ])->assertSessionHasErrors('resolutions');
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/resolutions', [
+            'resolutions' => ['2' => ['action' => 'resolve', 'target_id' => $secondContact->id]],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $this->assertDatabaseCount('contacts', 3);
+        $this->assertDatabaseHas('contacts', ['id' => $firstContact->id, 'name' => 'Ana Silva', 'job_title' => 'Arquiteta']);
+        $this->assertDatabaseHas('contacts', ['id' => $secondContact->id, 'name' => 'Ana Silva Atualizada', 'job_title' => 'Diretora']);
+        $this->assertDatabaseHas('company_contacts', [
+            'organization_id' => $organization->id,
+            'company_id' => $destinationCompany->id,
+            'contact_id' => $secondContact->id,
+        ]);
+        $this->assertSame(['buyer'], json_decode((string) DB::table('company_contacts')
+            ->where('company_id', $destinationCompany->id)
+            ->where('contact_id', $secondContact->id)
+            ->value('roles'), true));
+        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'updated_rows' => 1]);
+    }
+
     public function test_a_salesperson_is_not_told_that_a_contact_exists_only_in_another_portfolio(): void
     {
         Storage::fake('local');
@@ -268,12 +700,9 @@ class DataImportTest extends TestCase
 
         $batch = DataImport::query()->findOrFail($importId);
         $this->assertSame(0, $batch->duplicate_rows);
-        $this->assertSame(1, $batch->invalid_rows);
-        $this->assertContains([
-            'line' => 2,
-            'type' => 'invalid',
-            'message' => 'A linha não pode ser importada no escopo de acesso atual.',
-        ], $batch->validation_errors);
+        $this->assertSame(0, $batch->invalid_rows);
+        $this->assertSame(1, $batch->valid_rows);
+        $this->assertSame([], $batch->validation_errors);
         $this->assertStringNotContainsString('fora-do-escopo@example.test', json_encode($batch->validation_errors));
         $this->assertStringNotContainsString('Contato fora do escopo', json_encode($batch->validation_errors));
         $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/confirm')
@@ -281,10 +710,161 @@ class DataImportTest extends TestCase
         $this->assertDatabaseHas('data_imports', [
             'id' => $importId,
             'status' => 'completed',
+            'created_rows' => 1,
             'duplicate_rows' => 0,
-            'invalid_rows' => 1,
+            'invalid_rows' => 0,
         ]);
-        $this->assertDatabaseCount('contacts', 1);
+        $this->assertDatabaseCount('contacts', 2);
+        $this->assertDatabaseHas('contacts', ['id' => $hiddenContact->id, 'name' => 'Contato fora do escopo']);
+        $this->assertDatabaseHas('company_contacts', [
+            'organization_id' => $organization->id,
+            'company_id' => $visibleCompany->id,
+            'contact_id' => Contact::query()->where('name', 'Pessoa nova')->value('id'),
+        ]);
+    }
+
+    public function test_contact_duplicate_candidates_are_hidden_after_a_salesperson_loses_portfolio_access(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $otherSalesperson = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        $organization->users()->attach($otherSalesperson, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->ownedBy($salesperson)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa na carteira',
+        ]);
+        $contact = Contact::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Ana Silva',
+            'email' => 'ana.visivel@example.test',
+            'job_title' => 'Cargo original',
+        ]);
+        $company->contacts()->attach($contact->id, [
+            'organization_id' => $organization->id,
+            'roles' => ['buyer'],
+            'is_primary' => false,
+        ]);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($salesperson)->withSession($session)->post('/imports', [
+            'record_type' => 'contacts',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent(
+                'contacts.csv',
+                "Name,Email,Job title,Company name\nAna Silva Atualizada,ana.visivel@example.test,Diretora,Empresa na carteira\nAna Silva Atualizada,ana.visivel@example.test,Diretora,Empresa na carteira\n",
+            ),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'email' => '1', 'job_title' => '2', 'company_name' => '3'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->assertSame([$contact->id], array_column(DataImport::query()->findOrFail($importId)->validation_errors[0]['candidates'], 'id'));
+
+        $company->update(['owner_user_id' => $otherSalesperson->id]);
+        $this->actingAs($salesperson)->withSession($session)->get('/imports/'.$importId)
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('imports/show')
+                ->where('import.validation_errors.0.type', 'invalid')
+                ->where('import.validation_errors.0.message', 'A linha não pode ser importada no escopo de acesso atual.')
+                ->missing('import.validation_errors.0.candidates')
+                ->where('import.invalid_rows', 2)
+                ->where('import.duplicate_rows', 0)
+                ->missing('import.duplicate_resolutions.2.target_id'));
+        $this->actingAs($salesperson)->withSession($session)->get('/imports')
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('imports/index')
+                ->where('imports.data.0.invalid_rows', 2)
+                ->where('imports.data.0.duplicate_rows', 0));
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/resolutions', [
+            'resolutions' => ['2' => ['action' => 'update']],
+        ])->assertSessionHasErrors('resolutions');
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $this->assertDatabaseHas('contacts', [
+            'id' => $contact->id,
+            'name' => 'Ana Silva',
+            'job_title' => 'Cargo original',
+        ]);
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $importId,
+            'status' => 'completed',
+            'created_rows' => 0,
+            'updated_rows' => 0,
+            'invalid_rows' => 2,
+        ]);
+    }
+
+    public function test_contact_duplicate_overflow_is_not_exposed_after_a_salesperson_loses_portfolio_access(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $otherSalesperson = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        $organization->users()->attach($otherSalesperson, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->ownedBy($salesperson)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa de 101 contatos',
+        ]);
+        $contacts = [];
+        $csvRows = ['Name,Email,Company name'];
+
+        for ($index = 1; $index <= 101; $index++) {
+            $contacts[] = Contact::factory()->create([
+                'organization_id' => $organization->id,
+                'name' => 'Contato '.$index,
+                'email' => 'contato.'.$index.'@overflow.example.test',
+            ]);
+            $csvRows[] = 'Contato atualizado '.$index.',contato.'.$index.'@overflow.example.test,'.$company->name;
+        }
+
+        $company->contacts()->attach(collect($contacts)->mapWithKeys(fn (Contact $contact): array => [
+            $contact->id => [
+                'organization_id' => $organization->id,
+                'roles' => ['buyer'],
+                'is_primary' => false,
+            ],
+        ])->all());
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($salesperson)->withSession($session)->post('/imports', [
+            'record_type' => 'contacts',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('contacts.csv', implode("\n", $csvRows)),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'email' => '1', 'company_name' => '2'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $batch = DataImport::query()->findOrFail($importId);
+        $this->assertSame(101, $batch->duplicate_rows);
+        $this->assertCount(100, $batch->validation_errors);
+
+        $company->update(['owner_user_id' => $otherSalesperson->id]);
+
+        $this->actingAs($salesperson)->withSession($session)->get('/imports/'.$importId)
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('imports/show')
+                ->where('import.invalid_rows', 101)
+                ->where('import.duplicate_rows', 0));
+        $this->actingAs($salesperson)->withSession($session)->get('/imports')
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('imports/index')
+                ->where('imports.data.0.invalid_rows', 101)
+                ->where('imports.data.0.duplicate_rows', 0));
     }
 
     public function test_an_owner_can_validate_and_confirm_a_company_import_with_partial_row_errors(): void
@@ -403,6 +983,42 @@ class DataImportTest extends TestCase
             'duplicate_rows' => 1,
             'skipped_rows' => 1,
         ]);
+    }
+
+    public function test_company_import_includes_visible_candidates_for_duplicates_found_at_write_time(): void
+    {
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa concorrente',
+            'city' => 'Recife',
+            'state' => 'PE',
+            'tax_id' => null,
+        ]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'record_type' => 'companies',
+            'status' => 'validated',
+        ]);
+
+        $result = app(CompanyImportService::class)->import(
+            $batch,
+            $owner,
+            [[
+                'line' => 2,
+                'attributes' => ['name' => $company->name, 'city' => $company->city, 'state' => $company->state],
+            ]],
+            app(CustomerScoreService::class),
+            null,
+            app(JourneyService::class),
+        );
+
+        $this->assertSame(1, $result['duplicateRows']);
+        $this->assertSame([$company->id], array_column($result['errors'][0]['candidates'], 'id'));
     }
 
     public function test_company_import_can_explicitly_update_a_visible_duplicate_without_overwriting_unmapped_fields(): void
@@ -769,8 +1385,71 @@ class DataImportTest extends TestCase
             ->get('/imports/'.$importId)
             ->assertInertia(fn (AssertableInertia $page) => $page
                 ->component('imports/show')
-                ->where('import.validation_errors.0.candidates', [])
+                ->where('import.validation_errors.0.type', 'invalid')
+                ->where('import.validation_errors.0.message', 'A linha não pode ser importada no escopo de acesso atual.')
+                ->missing('import.validation_errors.0.candidates')
+                ->where('import.invalid_rows', 1)
+                ->where('import.duplicate_rows', 0)
                 ->missing('import.duplicate_resolutions.2.target_id'));
+    }
+
+    public function test_company_duplicate_overflow_is_not_exposed_after_a_salesperson_loses_portfolio_access(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $otherSalesperson = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        $organization->users()->attach($otherSalesperson, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $companies = [];
+        $csvRows = ['Name,City,State'];
+
+        for ($index = 1; $index <= 101; $index++) {
+            $name = 'Escritório '.$index;
+            $companies[] = Company::factory()->ownedBy($salesperson)->create([
+                'organization_id' => $organization->id,
+                'name' => $name,
+                'city' => 'Recife',
+                'state' => 'PE',
+                'tax_id' => null,
+            ]);
+            $csvRows[] = $name.',Recife,PE';
+        }
+
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($salesperson)->withSession($session)->post('/imports', [
+            'record_type' => 'companies',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('companies.csv', implode("\n", $csvRows)),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'city' => '1', 'state' => '2'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $batch = DataImport::query()->findOrFail($importId);
+        $this->assertSame(101, $batch->duplicate_rows);
+        $this->assertCount(100, $batch->validation_errors);
+
+        Company::query()->whereIn('id', collect($companies)->pluck('id'))->update([
+            'owner_user_id' => $otherSalesperson->id,
+        ]);
+
+        $this->actingAs($salesperson)->withSession($session)->get('/imports/'.$importId)
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('imports/show')
+                ->where('import.invalid_rows', 101)
+                ->where('import.duplicate_rows', 0));
+        $this->actingAs($salesperson)->withSession($session)->get('/imports')
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('imports/index')
+                ->where('imports.data.0.invalid_rows', 101)
+                ->where('imports.data.0.duplicate_rows', 0));
     }
 
     public function test_new_ambiguity_prevents_an_earlier_single_match_update_until_manually_resolved(): void

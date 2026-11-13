@@ -327,7 +327,10 @@ class CompanyImportService
 
             if ($duplicate && (! isset($candidate['resolution']) || $candidate['resolution']['action'] !== 'create')) {
                 $duplicateRows++;
-                $this->appendError($errors, $candidate['line'], 'duplicate', 'A empresa passou a existir durante a importação; a linha foi ignorada com segurança.');
+                $this->appendError($errors, $candidate['line'], 'duplicate', 'A empresa passou a existir durante a importação; a linha foi ignorada com segurança.', [
+                    'candidates' => $this->duplicateCandidates($matchingCompanyIds, $existingKeys),
+                    'can_create' => true,
+                ]);
 
                 continue;
             }
@@ -351,7 +354,16 @@ class CompanyImportService
 
                     if ($canViewExisting) {
                         $duplicateRows++;
-                        $this->appendError($errors, $candidate['line'], 'duplicate', 'A empresa passou a existir durante a importação; a linha foi ignorada com segurança.');
+                        $this->appendError($errors, $candidate['line'], 'duplicate', 'A empresa passou a existir durante a importação; a linha foi ignorada com segurança.', [
+                            'candidates' => [[
+                                'id' => (int) $company->id,
+                                'name' => $company->name,
+                                'city' => $company->city,
+                                'state' => $company->state,
+                                'tax_id_masked' => $this->maskTaxId($company->tax_id),
+                            ]],
+                            'can_create' => true,
+                        ]);
                     } else {
                         $invalidRows++;
                         $this->appendError($errors, $candidate['line'], 'invalid', 'A linha não pode ser importada no escopo de acesso atual.');
@@ -630,6 +642,35 @@ class CompanyImportService
         }
     }
 
+    /**
+     * @param  list<int>  $companyIds
+     * @param  array{candidatesByKey: array<string, list<array{id: int, name: string, city: string|null, state: string|null, tax_id: string|null}>>}  $existingKeys
+     * @return list<array{id: int, name: string, city: string|null, state: string|null, tax_id_masked: string|null}>
+     */
+    private function duplicateCandidates(array $companyIds, array $existingKeys): array
+    {
+        $requestedIds = array_fill_keys($companyIds, true);
+        $candidates = [];
+
+        foreach ($existingKeys['candidatesByKey'] as $keyedCompanies) {
+            foreach ($keyedCompanies as $company) {
+                if (! isset($requestedIds[$company['id']])) {
+                    continue;
+                }
+
+                $candidates[$company['id']] = [
+                    'id' => $company['id'],
+                    'name' => $company['name'],
+                    'city' => $company['city'],
+                    'state' => $company['state'],
+                    'tax_id_masked' => $this->maskTaxId($company['tax_id']),
+                ];
+            }
+        }
+
+        return array_values($candidates);
+    }
+
     private function maskTaxId(?string $taxId): ?string
     {
         $digits = preg_replace('/\D+/', '', $taxId ?? '') ?? '';
@@ -679,7 +720,7 @@ class CompanyImportService
      */
     private function appendError(array &$errors, int $line, string $type, string $message, array $context = []): void
     {
-        if (count($errors) < 100) {
+        if (count($errors) < DataImport::MAX_VALIDATION_ERRORS) {
             $errors[] = ['line' => $line, 'type' => $type, 'message' => $message, ...$context];
         }
     }

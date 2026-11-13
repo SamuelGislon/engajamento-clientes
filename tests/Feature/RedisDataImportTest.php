@@ -4,6 +4,7 @@ use App\Domain\Imports\DataImportProcessor;
 use App\Domain\Tenancy\TenantContext;
 use App\Jobs\ProcessDataImportChunk;
 use App\Models\Company;
+use App\Models\Contact;
 use App\Models\DataImport;
 use App\Models\Organization;
 use App\Models\User;
@@ -108,5 +109,102 @@ it('updates a staged visible company duplicate through a Redis worker', function
         'phone' => '2222',
         'owner_user_id' => $owner->id,
         'notes' => 'Preservar pelo worker',
+    ]);
+});
+
+it('updates a staged visible contact duplicate and links its grouped rows through a Redis worker', function (): void {
+    $organization = Organization::factory()->create();
+    $owner = User::factory()->create();
+    $organization->users()->attach($owner, ['role' => 'owner']);
+    app(TenantContext::class)->set($organization);
+    $previousCompany = Company::factory()->create(['organization_id' => $organization->id]);
+    $firstCompany = Company::factory()->create(['organization_id' => $organization->id]);
+    $secondCompany = Company::factory()->create(['organization_id' => $organization->id]);
+    $contact = Contact::factory()->create([
+        'organization_id' => $organization->id,
+        'name' => 'Ana Silva',
+        'email' => 'ana.redis@example.test',
+        'job_title' => 'Cargo antigo',
+        'status' => 'inactive',
+    ]);
+    $previousCompany->contacts()->attach($contact->id, [
+        'organization_id' => $organization->id,
+        'roles' => ['owner'],
+        'is_primary' => true,
+        'notes' => 'Vínculo anterior',
+    ]);
+    $batch = DataImport::factory()->create([
+        'organization_id' => $organization->id,
+        'created_by' => $owner->id,
+        'record_type' => 'contacts',
+        'status' => 'queued',
+        'total_rows' => 2,
+        'valid_rows' => 2,
+        'processing_attempts' => 1,
+    ]);
+    app(DataImportProcessor::class)->stageRows($batch, [
+        [
+            'line' => 2,
+            'identity' => 'group:2',
+            'attributes' => ['name' => 'Ana Silva Atualizada', 'email' => 'ana.redis@example.test', 'job_title' => 'Diretora', 'status' => 'active'],
+            'company_id' => $firstCompany->id,
+            'roles' => ['buyer'],
+            'is_primary' => false,
+            'relationship_notes' => 'Escritório um',
+            'resolution' => ['action' => 'update', 'target_id' => $contact->id],
+        ],
+        [
+            'line' => 3,
+            'identity' => 'group:2',
+            'attributes' => ['name' => 'Ana Silva Atualizada', 'email' => 'ana.redis@example.test', 'job_title' => 'Diretora', 'status' => 'active'],
+            'company_id' => $secondCompany->id,
+            'roles' => ['specifier'],
+            'is_primary' => false,
+            'relationship_notes' => 'Escritório dois',
+            'resolution' => ['action' => 'update', 'target_id' => $contact->id],
+        ],
+    ]);
+    $queue = 'data-import-'.Str::uuid();
+
+    ProcessDataImportChunk::dispatch($organization->id, $batch->id, 1)->onQueue($queue);
+
+    $exitCode = Artisan::call('queue:work', [
+        'connection' => 'redis',
+        '--once' => true,
+        '--queue' => $queue,
+        '--sleep' => 0,
+        '--tries' => 1,
+    ]);
+
+    expect($exitCode)->toBe(0, Artisan::output())
+        ->and($batch->refresh()->status)->toBe('completed')
+        ->and($batch->processed_rows)->toBe(2)
+        ->and($batch->created_rows)->toBe(0)
+        ->and($batch->updated_rows)->toBe(1);
+
+    $this->assertDatabaseHas('contacts', [
+        'id' => $contact->id,
+        'name' => 'Ana Silva Atualizada',
+        'job_title' => 'Diretora',
+        'status' => 'inactive',
+    ]);
+    $this->assertDatabaseHas('company_contacts', [
+        'organization_id' => $organization->id,
+        'company_id' => $previousCompany->id,
+        'contact_id' => $contact->id,
+        'is_primary' => true,
+        'notes' => 'Vínculo anterior',
+    ]);
+    $this->assertDatabaseHas('company_contacts', [
+        'organization_id' => $organization->id,
+        'company_id' => $firstCompany->id,
+        'contact_id' => $contact->id,
+        'notes' => 'Escritório um',
+    ]);
+    $this->assertDatabaseHas('company_contacts', [
+        'organization_id' => $organization->id,
+        'company_id' => $secondCompany->id,
+        'contact_id' => $contact->id,
+        'notes' => 'Escritório dois',
     ]);
 });
