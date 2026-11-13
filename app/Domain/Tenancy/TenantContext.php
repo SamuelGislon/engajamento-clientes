@@ -13,6 +13,11 @@ final class TenantContext
         $this->organization = $organization;
     }
 
+    public function clear(): void
+    {
+        $this->organization = null;
+    }
+
     public function organization(): ?Organization
     {
         return $this->organization;

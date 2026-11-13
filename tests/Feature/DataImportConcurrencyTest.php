@@ -2,6 +2,7 @@
 
 use App\Domain\Imports\CompanyImportService;
 use App\Domain\Imports\ContactImportService;
+use App\Domain\Imports\DataImportProcessor;
 use App\Domain\Tenancy\TenantContext;
 use App\Models\Company;
 use App\Models\DataImport;
@@ -228,6 +229,99 @@ PHP;
         @unlink($startedMarker.'.done');
         DB::table('organizations')->where('id', $organization->id)->delete();
         DB::table('users')->where('id', $manager->id)->delete();
+        DB::connection()->beginTransaction();
+    }
+});
+
+it('rechecks an importer membership after waiting for a concurrent organization revocation', function () {
+    if (DB::connection()->getDriverName() !== 'pgsql') {
+        $this->markTestSkipped('Queued import membership locking is verified against PostgreSQL.');
+    }
+
+    $organization = Organization::factory()->create();
+    $owner = User::factory()->create();
+    $otherOwner = User::factory()->create();
+    $organization->users()->attach($owner, ['role' => 'owner']);
+    $organization->users()->attach($otherOwner, ['role' => 'owner']);
+    app(TenantContext::class)->set($organization);
+    $batch = DataImport::factory()->create([
+        'organization_id' => $organization->id,
+        'created_by' => $owner->id,
+        'status' => 'queued',
+        'total_rows' => 1,
+        'valid_rows' => 1,
+        'processing_attempts' => 1,
+    ]);
+    app(DataImportProcessor::class)->stageRows($batch, [[
+        'line' => 2,
+        'attributes' => ['name' => 'Não criar após revogação'],
+    ]]);
+    DB::connection()->commit();
+
+    $startedMarker = tempnam(sys_get_temp_dir(), 'import-member-lock-');
+    expect($startedMarker)->not->toBeFalse();
+    @unlink($startedMarker);
+    $worker = null;
+
+    try {
+        DB::beginTransaction();
+        Organization::query()->lockForUpdate()->findOrFail($organization->id);
+        DB::table('organization_user')
+            ->where('organization_id', $organization->id)
+            ->where('user_id', $owner->id)
+            ->update(['is_active' => false, 'updated_at' => now()]);
+
+        $script = <<<'PHP'
+require 'vendor/autoload.php';
+$app = require 'bootstrap/app.php';
+$app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$organization = \App\Models\Organization::query()->findOrFail((int) $argv[1]);
+app(\App\Domain\Tenancy\TenantContext::class)->set($organization);
+file_put_contents($argv[3].'.started', 'started');
+app()->call([new \App\Jobs\ProcessDataImportChunk((int) $argv[1], (int) $argv[2], 1), 'handle']);
+file_put_contents($argv[3].'.done', 'done');
+PHP;
+        $worker = new Process([
+            PHP_BINARY,
+            '-r',
+            $script,
+            (string) $organization->id,
+            (string) $batch->id,
+            $startedMarker,
+        ], base_path(), timeout: 30);
+        $worker->start();
+
+        $deadline = microtime(true) + 10;
+        while (microtime(true) < $deadline && ! file_exists($startedMarker.'.started')) {
+            usleep(25_000);
+        }
+
+        expect(file_exists($startedMarker.'.started'))->toBeTrue('The queued import worker did not start.');
+        usleep(300_000);
+        expect($worker->isRunning())->toBeTrue('The worker must wait for the in-flight organization membership update.');
+        expect(file_exists($startedMarker.'.done'))->toBeFalse();
+
+        DB::connection()->commit();
+        $worker->wait();
+
+        expect($worker->getExitCode())->not->toBe(0)
+            ->and(file_exists($startedMarker.'.done'))->toBeFalse()
+            ->and($batch->fresh()->status)->toBe('queued')
+            ->and(Company::query()->where('name', 'Não criar após revogação')->exists())->toBeFalse();
+    } finally {
+        if (DB::transactionLevel() > 0) {
+            DB::rollBack();
+        }
+
+        if ($worker?->isRunning()) {
+            $worker->stop();
+        }
+
+        @unlink($startedMarker);
+        @unlink($startedMarker.'.started');
+        @unlink($startedMarker.'.done');
+        DB::table('organizations')->where('id', $organization->id)->delete();
+        DB::table('users')->whereIn('id', [$owner->id, $otherOwner->id])->delete();
         DB::connection()->beginTransaction();
     }
 });

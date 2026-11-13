@@ -2,8 +2,11 @@
 
 namespace App\Domain\Imports;
 
+use App\Domain\Commercial\CustomerScoreService;
+use App\Domain\Journeys\JourneyService;
 use App\Models\Company;
 use App\Models\DataImport;
+use App\Models\JourneyTemplate;
 use App\Models\Team;
 use App\Models\User;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -156,6 +159,109 @@ class CompanyImportService
         ];
     }
 
+    /**
+     * @param  list<array{line: int, attributes: array<string, mixed>}>  $validRows
+     * @return array{createdRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
+     */
+    public function import(
+        DataImport $batch,
+        User $actor,
+        array $validRows,
+        CustomerScoreService $scores,
+        ?JourneyTemplate $journeyTemplate,
+        JourneyService $journeys,
+    ): array {
+        $this->assertDestinationStillAuthorized($batch, $actor, true);
+        $candidates = [];
+
+        foreach ($validRows as $row) {
+            $candidates[] = [
+                'line' => $row['line'],
+                'attributes' => $row['attributes'],
+                'keys' => $this->identityKeys($row['attributes']),
+            ];
+        }
+
+        $existingKeys = $this->existingIdentityKeys($batch, $actor, $candidates);
+        $createdRows = 0;
+        $duplicateRows = 0;
+        $invalidRows = 0;
+        $errors = [];
+
+        foreach ($candidates as $candidate) {
+            $outsidePortfolio = false;
+            $duplicate = false;
+
+            foreach ($candidate['keys'] as $key) {
+                if (isset($existingKeys['hidden'][$key])) {
+                    $outsidePortfolio = true;
+                } elseif (isset($existingKeys['visible'][$key])) {
+                    $duplicate = true;
+                }
+            }
+
+            if ($outsidePortfolio) {
+                $invalidRows++;
+                $this->appendError($errors, $candidate['line'], 'invalid', 'A linha não pode ser importada no escopo de acesso atual.');
+
+                continue;
+            }
+
+            if ($duplicate) {
+                $duplicateRows++;
+                $this->appendError($errors, $candidate['line'], 'duplicate', 'A empresa passou a existir durante a importação; a linha foi ignorada com segurança.');
+
+                continue;
+            }
+
+            $attributes = $candidate['attributes'];
+            $taxId = $attributes['tax_id'] ?? null;
+            unset($attributes['tax_id']);
+
+            if ($taxId !== null) {
+                $company = Company::query()->firstOrCreate(
+                    ['tax_id' => $taxId],
+                    ['tax_id' => $taxId, ...$attributes],
+                );
+
+                if (! $company->wasRecentlyCreated) {
+                    $canViewExisting = Company::query()
+                        ->where('organization_id', $batch->organization_id)
+                        ->visibleTo($actor)
+                        ->whereKey($company->id)
+                        ->exists();
+
+                    if ($canViewExisting) {
+                        $duplicateRows++;
+                        $this->appendError($errors, $candidate['line'], 'duplicate', 'A empresa passou a existir durante a importação; a linha foi ignorada com segurança.');
+                    } else {
+                        $invalidRows++;
+                        $this->appendError($errors, $candidate['line'], 'invalid', 'A linha não pode ser importada no escopo de acesso atual.');
+                    }
+
+                    continue;
+                }
+            } else {
+                $company = Company::query()->create($attributes);
+            }
+
+            $scores->recalculateForCompany($company, 'Importação de planilha');
+
+            if ($journeyTemplate !== null && $company->relationship_status === 'prospect') {
+                $journeys->enrollManually($company, $journeyTemplate, $actor);
+            }
+
+            $createdRows++;
+        }
+
+        return [
+            'createdRows' => $createdRows,
+            'duplicateRows' => $duplicateRows,
+            'invalidRows' => $invalidRows,
+            'errors' => $errors,
+        ];
+    }
+
     private function assertDestinationStillAuthorized(DataImport $batch, User $actor, bool $lockDestination): void
     {
         $role = $actor->roleIn($batch->organization_id);
@@ -257,7 +363,7 @@ class CompanyImportService
                         ->orWhereIn(DB::raw('LOWER(name)'), array_unique($lowerNames));
                 }
             })
-            ->get(['tax_id', 'name', 'city', 'state']);
+            ->get(['id', 'tax_id', 'name', 'city', 'state']);
 
         $keys = ['visible' => [], 'hidden' => []];
 

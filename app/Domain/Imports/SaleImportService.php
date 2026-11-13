@@ -253,6 +253,15 @@ class SaleImportService
                 continue;
             }
 
+            $seller = $this->authorizedSellerForImport($batch, $actor, $company, $row['seller_id']);
+
+            if ($seller === null) {
+                $invalidRows++;
+                $this->appendError($errors, $row['line'], 'invalid', 'As permissões do vendedor ou da equipe mudaram; a linha não foi importada.');
+
+                continue;
+            }
+
             $isFirstPurchase = $row['status'] === 'confirmed'
                 && $company->relationship_status === 'prospect'
                 && ! $company->sales()->where('status', 'confirmed')->exists();
@@ -260,7 +269,7 @@ class SaleImportService
             $saleAttributes = [
                 'organization_id' => $batch->organization_id,
                 'company_id' => $company->id,
-                'seller_id' => $row['seller_id'],
+                'seller_id' => $seller->id,
                 'team_id_at_sale' => $company->team_id,
                 'created_by' => $actor->id,
                 'external_id' => $row['external_id'],
@@ -327,6 +336,74 @@ class SaleImportService
             'invalidRows' => $invalidRows,
             'errors' => $errors,
         ];
+    }
+
+    private function authorizedSellerForImport(DataImport $batch, User $actor, Company $company, int $sellerId): ?User
+    {
+        $team = null;
+
+        if ($company->team_id !== null) {
+            $team = Team::query()
+                ->where('organization_id', $batch->organization_id)
+                ->whereKey($company->team_id)
+                ->lockForUpdate()
+                ->first();
+
+            if ($team === null || $team->status !== 'active') {
+                return null;
+            }
+        }
+
+        $actorMembership = DB::table('organization_user')
+            ->where('organization_id', $batch->organization_id)
+            ->where('user_id', $actor->id)
+            ->lockForUpdate()
+            ->first(['role', 'is_active']);
+
+        if ($actorMembership === null
+            || ! (bool) $actorMembership->is_active
+            || ! in_array($actorMembership->role, ['owner', 'admin', 'manager', 'salesperson'], true)) {
+            return null;
+        }
+
+        $sellerMembership = DB::table('organization_user')
+            ->where('organization_id', $batch->organization_id)
+            ->where('user_id', $sellerId)
+            ->lockForUpdate()
+            ->first(['role', 'is_active']);
+
+        if ($sellerMembership === null
+            || ! (bool) $sellerMembership->is_active
+            || $sellerMembership->role !== 'salesperson') {
+            return null;
+        }
+
+        $seller = User::query()->find($sellerId);
+
+        if ($seller === null) {
+            return null;
+        }
+
+        $memberships = [];
+
+        if ($team !== null) {
+            $userIds = array_values(array_unique([(int) $actor->id, (int) $seller->id]));
+            sort($userIds);
+            $teamMemberships = DB::table('team_memberships')
+                ->where('organization_id', $batch->organization_id)
+                ->where('team_id', $team->id)
+                ->whereIn('user_id', $userIds)
+                ->where('is_active', true)
+                ->orderBy('user_id')
+                ->lockForUpdate()
+                ->get(['user_id', 'role']);
+
+            foreach ($teamMemberships as $membership) {
+                $memberships[$team->id.':'.$membership->user_id.':'.$membership->role] = true;
+            }
+        }
+
+        return $this->sellerIsAuthorized($batch, $actor, $company, $seller, $memberships) ? $seller : null;
     }
 
     private function assertImporter(DataImport $batch, User $actor, bool $lockDestination): void

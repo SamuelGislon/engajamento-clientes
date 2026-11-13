@@ -226,6 +226,37 @@ test('owner sees why confirmation stops when its destination team becomes inacti
     );
 });
 
+test('owner is told to enable an asynchronous queue before confirming a large import', async ({
+    page,
+}) => {
+    const importFilename = 'large-companies.csv';
+    const rows = Array.from(
+        { length: 251 },
+        (_, index) => `Empresa grande ${index + 1}`,
+    );
+
+    await signIn(page, 'owner@example.test');
+    await page.goto('/imports');
+    await page.getByLabel('Arquivo CSV ou Excel').setInputFiles({
+        name: importFilename,
+        mimeType: 'text/csv',
+        buffer: Buffer.from(['Name', ...rows].join('\n')),
+    });
+    await page.getByRole('button', { name: 'Enviar para prévia' }).click();
+    await page.getByRole('link', { name: importFilename }).click();
+    await page.getByLabel('Nome da empresa').selectOption('0');
+    await page.getByRole('button', { name: 'Salvar mapeamento' }).click();
+    await page.getByRole('button', { name: 'Validar todas as linhas' }).click();
+    await page.getByRole('button', { name: 'Confirmar importação' }).click();
+
+    await expect(page.getByRole('alert')).toContainText(
+        'Configure Redis e um worker',
+    );
+    await expect(
+        page.getByRole('heading', { name: 'Validar e confirmar' }),
+    ).toBeVisible();
+});
+
 async function signIn(
     page: import('@playwright/test').Page,
     email: string,

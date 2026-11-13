@@ -8,6 +8,7 @@ use App\Domain\Imports\CompanyImportFields;
 use App\Domain\Imports\CompanyImportService;
 use App\Domain\Imports\ContactImportFields;
 use App\Domain\Imports\ContactImportService;
+use App\Domain\Imports\DataImportProcessor;
 use App\Domain\Imports\ImportFileException;
 use App\Domain\Imports\SaleImportFields;
 use App\Domain\Imports\SaleImportService;
@@ -17,7 +18,7 @@ use App\Domain\Teams\CommercialAccessScope;
 use App\Domain\Tenancy\TenantContext;
 use App\Http\Requests\SaveDataImportMappingRequest;
 use App\Http\Requests\StoreDataImportRequest;
-use App\Models\Company;
+use App\Jobs\ProcessDataImportChunk;
 use App\Models\DataImport;
 use App\Models\JourneyTemplate;
 use App\Models\Organization;
@@ -58,6 +59,7 @@ class DataImportController extends Controller
                     'journey_mode' => $dataImport->journey_mode,
                     'total_rows' => $dataImport->total_rows,
                     'valid_rows' => $dataImport->valid_rows,
+                    'processed_rows' => $dataImport->processed_rows,
                     'invalid_rows' => $dataImport->invalid_rows,
                     'created_rows' => $dataImport->created_rows,
                     'updated_rows' => $dataImport->updated_rows,
@@ -136,17 +138,19 @@ class DataImportController extends Controller
         $organizationId = app(TenantContext::class)->id();
         $expectedPathPrefix = 'imports/'.$organizationId.'/';
 
-        if ($record->disk !== 'local' || ! Str::startsWith($record->file_path, $expectedPathPrefix)) {
-            abort(404);
-        }
-
         $preview = null;
         $fileError = null;
 
-        try {
-            $preview = $this->previewRecord($record, $previewReader);
-        } catch (ImportFileException $exception) {
-            $fileError = $exception->getMessage();
+        if (! in_array($record->status, ['queued', 'processing', 'failed', 'expired'], true)) {
+            if ($record->disk !== 'local' || ! Str::startsWith($record->file_path, $expectedPathPrefix)) {
+                abort(404);
+            }
+
+            try {
+                $preview = $this->previewRecord($record, $previewReader);
+            } catch (ImportFileException $exception) {
+                $fileError = $exception->getMessage();
+            }
         }
 
         return Inertia::render('imports/show', [
@@ -161,6 +165,8 @@ class DataImportController extends Controller
                 'validation_errors' => $record->validation_errors ?? [],
                 'total_rows' => $record->total_rows,
                 'valid_rows' => $record->valid_rows,
+                'processed_rows' => $record->processed_rows,
+                'last_error' => $record->last_error,
                 'invalid_rows' => $record->invalid_rows,
                 'duplicate_rows' => $record->duplicate_rows,
                 'created_rows' => $record->created_rows,
@@ -190,9 +196,11 @@ class DataImportController extends Controller
     ): RedirectResponse {
         $record = DataImport::query()->findOrFail($dataImport);
         Gate::authorize('update', $record);
-        if (in_array($record->status, ['completed', 'expired'], true)) {
+        if (in_array($record->status, ['completed', 'expired', 'queued', 'processing'], true)) {
             throw ValidationException::withMessages(['mapping' => 'Este lote não pode mais ser alterado.']);
         }
+
+        $this->preventResettingPartialImport($record, 'mapping');
 
         $preview = $this->previewRecord($record, $previewReader);
         $validated = $request->validated();
@@ -240,6 +248,14 @@ class DataImportController extends Controller
             'created_rows' => 0,
             'updated_rows' => 0,
             'skipped_rows' => 0,
+            'processed_rows' => 0,
+            'processing_attempts' => 0,
+            'queue_dispatches' => 0,
+            'last_processed_line' => null,
+            'last_error' => null,
+            'processing_started_at' => null,
+            'processing_heartbeat_at' => null,
+            'failed_at' => null,
         ];
 
         if ($record->record_type === 'companies' && array_key_exists('journey_mode', $validated)) {
@@ -253,10 +269,13 @@ class DataImportController extends Controller
             $lockedRecord = DataImport::query()->lockForUpdate()->findOrFail($dataImport);
             Gate::forUser($request->user())->authorize('update', $lockedRecord);
 
-            if (in_array($lockedRecord->status, ['completed', 'expired'], true)) {
+            if (in_array($lockedRecord->status, ['completed', 'expired', 'queued', 'processing'], true)) {
                 throw ValidationException::withMessages(['mapping' => 'Este lote já foi confirmado e não pode mais ser alterado.']);
             }
 
+            $this->preventResettingPartialImport($lockedRecord, 'mapping');
+
+            $lockedRecord->rows()->delete();
             $lockedRecord->update($attributes);
         });
 
@@ -278,9 +297,11 @@ class DataImportController extends Controller
             throw ValidationException::withMessages(['mapping' => 'Salve o mapeamento antes de validar as linhas.']);
         }
 
-        if (in_array($record->status, ['completed', 'expired'], true)) {
+        if (in_array($record->status, ['completed', 'expired', 'queued', 'processing'], true)) {
             throw ValidationException::withMessages(['file' => 'Este lote não pode mais ser validado.']);
         }
+
+        $this->preventResettingPartialImport($record, 'file');
 
         try {
             $preview = $this->previewRecord($record, $previewReader, SpreadsheetPreviewReader::MAX_ROWS);
@@ -304,14 +325,39 @@ class DataImportController extends Controller
             $preview['malformedRows'],
         );
 
-        $record->update([
-            'status' => 'validated',
-            'total_rows' => $analysis['totalRows'],
-            'valid_rows' => count($analysis['validRows']),
-            'invalid_rows' => $analysis['invalidRows'],
-            'duplicate_rows' => $analysis['duplicateRows'],
-            'validation_errors' => $analysis['errors'],
-        ]);
+        DB::transaction(function () use ($request, $record, $analysis): void {
+            $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
+            Gate::forUser($request->user())->authorize('update', $batch);
+
+            if (in_array($batch->status, ['completed', 'expired', 'queued', 'processing'], true)) {
+                throw ValidationException::withMessages(['file' => 'Este lote não pode mais ser validado.']);
+            }
+
+            $this->preventResettingPartialImport($batch, 'file');
+
+            $validRows = $analysis['totalRows'] > DataImportProcessor::ASYNC_ROW_THRESHOLD
+                ? $analysis['validRows']
+                : [];
+            app(DataImportProcessor::class)->stageRows($batch, $validRows);
+
+            $batch->update([
+                'status' => 'validated',
+                'total_rows' => $analysis['totalRows'],
+                'valid_rows' => count($analysis['validRows']),
+                'processed_rows' => 0,
+                'processing_attempts' => 0,
+                'queue_dispatches' => 0,
+                'last_processed_line' => null,
+                'last_error' => null,
+                'processing_started_at' => null,
+                'processing_heartbeat_at' => null,
+                'failed_at' => null,
+                'invalid_rows' => $analysis['invalidRows'],
+                'duplicate_rows' => $analysis['duplicateRows'],
+                'skipped_rows' => $analysis['invalidRows'] + $analysis['duplicateRows'],
+                'validation_errors' => $analysis['errors'],
+            ]);
+        });
 
         return redirect()->route('imports.show', $record->id)->with('success', 'Validação concluída. Revise os totais antes de confirmar.');
     }
@@ -334,7 +380,7 @@ class DataImportController extends Controller
             $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
             Gate::authorize('update', $batch);
 
-            if ($batch->status === 'completed') {
+            if (in_array($batch->status, ['completed', 'queued', 'processing'], true)) {
                 return;
             }
 
@@ -372,6 +418,47 @@ class DataImportController extends Controller
                         'journey_template_id' => 'O modelo selecionado foi desativado ou não está mais disponível. Escolha outro modelo ou nenhuma jornada, salve o mapeamento e tente novamente.',
                     ]);
                 }
+            }
+
+            if ($batch->total_rows > DataImportProcessor::ASYNC_ROW_THRESHOLD) {
+                if ($batch->valid_rows === 0) {
+                    $batch->update([
+                        'status' => 'completed',
+                        'processed_rows' => $batch->total_rows,
+                        'confirmed_at' => now(),
+                    ]);
+
+                    return;
+                }
+
+                if (config('queue.default') === 'sync') {
+                    throw ValidationException::withMessages([
+                        'file' => 'Este lote exige uma fila assíncrona. Configure Redis e um worker antes de confirmar arquivos com mais de 250 linhas.',
+                    ]);
+                }
+
+                $pendingRows = $batch->rows()->where('status', 'pending')->count();
+
+                if ($pendingRows !== $batch->valid_rows) {
+                    throw ValidationException::withMessages(['file' => 'O preparo seguro das linhas foi interrompido. Valide o arquivo novamente.']);
+                }
+
+                $attemptNumber = $batch->processing_attempts + 1;
+                $batch->update([
+                    'status' => 'queued',
+                    'processed_rows' => $batch->total_rows - $batch->valid_rows,
+                    'processing_attempts' => $attemptNumber,
+                    'queue_dispatches' => 1,
+                    'last_processed_line' => null,
+                    'last_error' => null,
+                    'processing_started_at' => null,
+                    'processing_heartbeat_at' => null,
+                    'failed_at' => null,
+                ]);
+
+                ProcessDataImportChunk::dispatch($batch->organization_id, $batch->id, $attemptNumber)->afterCommit();
+
+                return;
             }
 
             try {
@@ -424,58 +511,18 @@ class DataImportController extends Controller
                     $preview['malformedRows'],
                 );
 
-                foreach ($analysis['validRows'] as $row) {
-                    $attributes = $row['attributes'];
-                    $taxId = $attributes['tax_id'] ?? null;
-                    unset($attributes['tax_id']);
-
-                    if ($taxId !== null) {
-                        $company = Company::query()->firstOrCreate(
-                            ['tax_id' => $taxId],
-                            ['tax_id' => $taxId, ...$attributes],
-                        );
-
-                        if (! $company->wasRecentlyCreated) {
-                            $canViewExistingCompany = Company::query()
-                                ->where('organization_id', $batch->organization_id)
-                                ->visibleTo($request->user())
-                                ->whereKey($company->id)
-                                ->exists();
-
-                            if ($canViewExistingCompany) {
-                                $raceDuplicates++;
-                                $error = [
-                                    'line' => $row['line'],
-                                    'type' => 'duplicate',
-                                    'message' => 'A empresa passou a existir durante a importação; a linha foi ignorada com segurança.',
-                                ];
-                            } else {
-                                $raceInvalidRows++;
-                                $error = [
-                                    'line' => $row['line'],
-                                    'type' => 'invalid',
-                                    'message' => 'A linha não pode ser importada no escopo de acesso atual.',
-                                ];
-                            }
-
-                            if (count($analysis['errors']) < 100) {
-                                $analysis['errors'][] = $error;
-                            }
-
-                            continue;
-                        }
-                    } else {
-                        $company = Company::query()->create($attributes);
-                    }
-
-                    $scores->recalculateForCompany($company, 'Importação de planilha');
-
-                    if ($journeyTemplate !== null && $company->relationship_status === 'prospect') {
-                        $journeys->enrollManually($company, $journeyTemplate, $request->user());
-                    }
-
-                    $createdRows++;
-                }
+                $importResult = $companyImports->import(
+                    $batch,
+                    $request->user(),
+                    $analysis['validRows'],
+                    $scores,
+                    $journeyTemplate,
+                    $journeys,
+                );
+                $createdRows = $importResult['createdRows'];
+                $raceDuplicates = $importResult['duplicateRows'];
+                $raceInvalidRows = $importResult['invalidRows'];
+                $analysis['errors'] = array_merge($analysis['errors'], $importResult['errors']);
             }
 
             $duplicateRows = $analysis['duplicateRows'] + $raceDuplicates;
@@ -484,17 +531,74 @@ class DataImportController extends Controller
                 'status' => 'completed',
                 'total_rows' => $analysis['totalRows'],
                 'valid_rows' => count($analysis['validRows']) - $raceDuplicates - $raceInvalidRows,
+                'processed_rows' => $analysis['totalRows'],
                 'invalid_rows' => $invalidRows,
                 'duplicate_rows' => $duplicateRows,
                 'created_rows' => $createdRows,
                 'updated_rows' => 0,
                 'skipped_rows' => $invalidRows + $duplicateRows,
                 'validation_errors' => $analysis['errors'],
+                'last_error' => null,
+                'processing_started_at' => null,
+                'processing_heartbeat_at' => null,
+                'failed_at' => null,
                 'confirmed_at' => now(),
             ]);
         });
 
-        return redirect()->route('imports.show', $record->id)->with('success', 'Importação concluída. Confira os totais e as linhas ignoradas.');
+        $latestRecord = DataImport::query()->findOrFail($record->id);
+        $message = in_array($latestRecord->status, ['queued', 'processing'], true)
+            ? 'Importação enviada à fila. Você pode acompanhar o progresso nesta página.'
+            : 'Importação concluída. Confira os totais e as linhas ignoradas.';
+
+        return redirect()->route('imports.show', $record->id)->with('success', $message);
+    }
+
+    public function resume(Request $request, int $dataImport): RedirectResponse
+    {
+        $record = DataImport::query()->findOrFail($dataImport);
+        Gate::authorize('update', $record);
+
+        DB::transaction(function () use ($request, $record): void {
+            $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
+            Gate::forUser($request->user())->authorize('update', $batch);
+
+            if ($batch->status !== 'failed') {
+                throw ValidationException::withMessages(['file' => 'Somente lotes interrompidos podem ser retomados.']);
+            }
+
+            if ($batch->expires_at->isPast()) {
+                throw ValidationException::withMessages(['file' => 'O prazo para retomar este arquivo terminou. Envie-o novamente.']);
+            }
+
+            if (config('queue.default') === 'sync') {
+                throw ValidationException::withMessages([
+                    'file' => 'Configure Redis e um worker antes de retomar este lote para evitar processá-lo dentro da requisição.',
+                ]);
+            }
+
+            $pendingRows = $batch->rows()->where('status', 'pending')->count();
+            $expectedPendingRows = max(0, $batch->total_rows - $batch->processed_rows);
+
+            if ($pendingRows === 0 || $pendingRows !== $expectedPendingRows) {
+                throw ValidationException::withMessages(['file' => 'As linhas restantes não estão disponíveis para retomada. Valide o arquivo novamente.']);
+            }
+
+            $attemptNumber = $batch->processing_attempts + 1;
+            $batch->update([
+                'status' => 'queued',
+                'processing_attempts' => $attemptNumber,
+                'queue_dispatches' => 1,
+                'last_error' => null,
+                'processing_started_at' => null,
+                'processing_heartbeat_at' => null,
+                'failed_at' => null,
+            ]);
+
+            ProcessDataImportChunk::dispatch($batch->organization_id, $batch->id, $attemptNumber)->afterCommit();
+        });
+
+        return redirect()->route('imports.show', $record->id)->with('success', 'Importação retomada. O processamento continuará a partir das linhas pendentes.');
     }
 
     /** @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int, malformedRows: list<int>} */
@@ -532,5 +636,14 @@ class DataImportController extends Controller
             'sales' => app(SaleImportFields::class)->options(),
             default => [],
         };
+    }
+
+    private function preventResettingPartialImport(DataImport $batch, string $field): void
+    {
+        if ($batch->status === 'failed' && $batch->created_rows > 0) {
+            throw ValidationException::withMessages([
+                $field => 'Este lote já gravou registros. Retome as linhas pendentes para evitar repetir dados já importados.',
+            ]);
+        }
     }
 }

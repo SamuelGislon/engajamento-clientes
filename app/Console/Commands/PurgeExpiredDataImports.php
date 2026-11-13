@@ -2,10 +2,12 @@
 
 namespace App\Console\Commands;
 
+use App\Jobs\ProcessDataImportChunk;
 use App\Models\DataImport;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -15,8 +17,16 @@ class PurgeExpiredDataImports extends Command
 {
     private const BATCH_SIZE = 500;
 
+    private const PROCESSING_LEASE_MINUTES = 15;
+
+    private const QUEUED_RETRY_MINUTES = 10;
+
+    private const QUEUE_DISPATCH_LIMIT = 3;
+
     public function handle(): int
     {
+        $this->failStaleImports();
+        $this->requeueStaleQueuedImports();
         $purged = 0;
 
         /**
@@ -26,8 +36,14 @@ class PurgeExpiredDataImports extends Command
          * @var list<DataImport> $expiredImports
          */
         $expiredImports = DataImport::withoutGlobalScopes()
-            ->where('status', '<>', 'expired')
             ->where('expires_at', '<=', now())
+            ->where(function ($query): void {
+                $query->where('status', '<>', 'processing')
+                    ->orWhereRaw(
+                        '(COALESCE(processing_heartbeat_at, processing_started_at) IS NULL OR COALESCE(processing_heartbeat_at, processing_started_at) <= ?)',
+                        [now()->subMinutes(self::PROCESSING_LEASE_MINUTES)],
+                    );
+            })
             ->whereNotNull('file_path')
             ->where('file_path', '<>', '')
             ->orderBy('id')
@@ -52,17 +68,38 @@ class PurgeExpiredDataImports extends Command
                 continue;
             }
 
-            $updated = DataImport::withoutGlobalScopes()
-                ->whereKey($dataImport->id)
-                ->where('status', '<>', 'expired')
-                ->where('file_path', $dataImport->file_path)
-                ->update([
+            $updated = DB::transaction(function () use ($dataImport): int {
+                $lockedImport = DataImport::withoutGlobalScopes()
+                    ->where('organization_id', $dataImport->organization_id)
+                    ->lockForUpdate()
+                    ->find($dataImport->id);
+
+                if ($lockedImport === null
+                    || $lockedImport->expires_at->isFuture()
+                    || $lockedImport->file_path !== $dataImport->file_path
+                    || ($lockedImport->status === 'processing' && $this->hasActiveProcessingLease($lockedImport))) {
+                    return 0;
+                }
+
+                $lockedImport->update([
                     'status' => 'expired',
                     'original_filename' => 'Arquivo expirado',
                     'file_path' => '',
                     'mapping' => null,
+                    'last_error' => null,
+                    'processing_started_at' => null,
+                    'processing_heartbeat_at' => null,
+                    'queue_dispatches' => 0,
                     'updated_at' => now(),
                 ]);
+
+                DB::table('data_import_rows')
+                    ->where('organization_id', $dataImport->organization_id)
+                    ->where('data_import_id', $dataImport->id)
+                    ->delete();
+
+                return 1;
+            });
 
             $purged += $updated;
         }
@@ -70,5 +107,112 @@ class PurgeExpiredDataImports extends Command
         $this->info("{$purged} lote(s) expirado(s) processado(s).");
 
         return self::SUCCESS;
+    }
+
+    private function failStaleImports(): void
+    {
+        // The scheduler is a bounded maintenance sweep across tenants; expired rows keep their tenant and are locked before mutation.
+        $staleImports = DataImport::withoutGlobalScopes()
+            ->where('status', 'processing')
+            ->where('expires_at', '>', now())
+            ->whereRaw(
+                '(COALESCE(processing_heartbeat_at, processing_started_at) IS NULL OR COALESCE(processing_heartbeat_at, processing_started_at) <= ?)',
+                [now()->subMinutes(self::PROCESSING_LEASE_MINUTES)],
+            )
+            ->orderBy('id')
+            ->limit(self::BATCH_SIZE)
+            ->get(['id', 'organization_id']);
+
+        foreach ($staleImports as $staleImport) {
+            DB::transaction(function () use ($staleImport): void {
+                $lockedImport = DataImport::withoutGlobalScopes()
+                    ->where('organization_id', $staleImport->organization_id)
+                    ->lockForUpdate()
+                    ->find($staleImport->id);
+
+                if ($lockedImport === null
+                    || $lockedImport->status !== 'processing'
+                    || $lockedImport->expires_at->isPast()
+                    || $this->hasActiveProcessingLease($lockedImport)) {
+                    return;
+                }
+
+                $lockedImport->update([
+                    'status' => 'failed',
+                    'processing_started_at' => null,
+                    'processing_heartbeat_at' => null,
+                    'failed_at' => now(),
+                    'last_error' => 'O processamento ficou sem atividade e pode ser retomado a partir das linhas pendentes.',
+                    'updated_at' => now(),
+                ]);
+            });
+        }
+    }
+
+    private function requeueStaleQueuedImports(): void
+    {
+        $cutoff = now()->subMinutes(self::QUEUED_RETRY_MINUTES);
+        $staleImports = DataImport::withoutGlobalScopes()
+            ->where('status', 'queued')
+            ->where('processing_attempts', '>', 0)
+            ->where('expires_at', '>', now())
+            ->where('updated_at', '<=', $cutoff)
+            ->orderBy('id')
+            ->limit(self::BATCH_SIZE)
+            ->get(['id', 'organization_id']);
+
+        foreach ($staleImports as $staleImport) {
+            /** @var array{organization_id: int, data_import_id: int, attempt_number: int}|null $jobDetails */
+            $jobDetails = DB::transaction(function () use ($staleImport, $cutoff): ?array {
+                $lockedImport = DataImport::withoutGlobalScopes()
+                    ->where('organization_id', $staleImport->organization_id)
+                    ->lockForUpdate()
+                    ->find($staleImport->id);
+
+                if ($lockedImport === null
+                    || $lockedImport->status !== 'queued'
+                    || $lockedImport->expires_at->isPast()
+                    || $lockedImport->updated_at->isAfter($cutoff)) {
+                    return null;
+                }
+
+                if ($lockedImport->queue_dispatches >= self::QUEUE_DISPATCH_LIMIT) {
+                    $lockedImport->update([
+                        'status' => 'failed',
+                        'failed_at' => now(),
+                        'last_error' => 'O lote não iniciou após tentativas limitadas de envio para a fila; você pode retomá-lo para tentar novamente.',
+                        'updated_at' => now(),
+                    ]);
+
+                    return null;
+                }
+
+                $lockedImport->forceFill([
+                    'queue_dispatches' => $lockedImport->queue_dispatches + 1,
+                    'updated_at' => now(),
+                ])->save();
+
+                return [
+                    'organization_id' => $lockedImport->organization_id,
+                    'data_import_id' => $lockedImport->id,
+                    'attempt_number' => $lockedImport->processing_attempts,
+                ];
+            });
+
+            if ($jobDetails !== null) {
+                ProcessDataImportChunk::dispatch(
+                    $jobDetails['organization_id'],
+                    $jobDetails['data_import_id'],
+                    $jobDetails['attempt_number'],
+                );
+            }
+        }
+    }
+
+    private function hasActiveProcessingLease(DataImport $dataImport): bool
+    {
+        $lease = $dataImport->processing_heartbeat_at ?? $dataImport->processing_started_at;
+
+        return $lease !== null && $lease->isAfter(now()->subMinutes(self::PROCESSING_LEASE_MINUTES));
     }
 }

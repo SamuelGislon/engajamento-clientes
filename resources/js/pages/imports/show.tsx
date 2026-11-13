@@ -1,4 +1,4 @@
-import { Head, Link, useForm } from '@inertiajs/react';
+import { Head, Link, useForm, usePoll } from '@inertiajs/react';
 import {
     ArrowLeft,
     FileSpreadsheet,
@@ -10,11 +10,13 @@ import {
     index as importsIndex,
     saveMapping as saveImportMapping,
     validateImport as validateDataImport,
+    resume as resumeDataImport,
 } from '@/actions/App/Http/Controllers/DataImportController';
 import { Button } from '@/components/ui/button';
 import InputError from '@/components/input-error';
 import { Label } from '@/components/ui/label';
 import type { BreadcrumbItem } from '@/types';
+import { useEffect } from 'react';
 
 type Preview = {
     sheetName: string;
@@ -34,6 +36,8 @@ type ImportRecord = {
     mapping: Record<string, number> | null;
     total_rows: number;
     valid_rows: number;
+    processed_rows: number;
+    last_error: string | null;
     invalid_rows: number;
     duplicate_rows: number;
     created_rows: number;
@@ -82,6 +86,23 @@ export default function ImportShow({
             : '',
     });
     const actionForm = useForm({});
+    const isQueueActive =
+        importRecord.status === 'queued' ||
+        importRecord.status === 'processing';
+    const { start: startPolling, stop: stopPolling } = usePoll(
+        2000,
+        { only: ['import'] },
+        { autoStart: false },
+    );
+    useEffect(() => {
+        if (isQueueActive) {
+            startPolling();
+        } else {
+            stopPolling();
+        }
+
+        return stopPolling;
+    }, [isQueueActive, startPolling, stopPolling]);
     const actionErrors = Object.values(actionForm.errors).filter(
         (message): message is string => typeof message === 'string',
     );
@@ -105,6 +126,12 @@ export default function ImportShow({
             confirmDataImport.url({ dataImport: importRecord.id }),
             { preserveScroll: true },
         );
+    }
+
+    function resumeRows() {
+        actionForm.post(resumeDataImport.url({ dataImport: importRecord.id }), {
+            preserveScroll: true,
+        });
     }
 
     return (
@@ -158,6 +185,80 @@ export default function ImportShow({
                         </div>
                     </div>
                 </header>
+
+                {['queued', 'processing', 'failed'].includes(
+                    importRecord.status,
+                ) && (
+                    <section
+                        aria-live="polite"
+                        className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm shadow-black/[0.02] md:p-7"
+                    >
+                        <h2 className="font-semibold">
+                            {importRecord.status === 'queued'
+                                ? 'Importação na fila'
+                                : importRecord.status === 'processing'
+                                  ? 'Importação em andamento'
+                                  : 'Importação interrompida'}
+                        </h2>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                            {importRecord.status === 'queued'
+                                ? 'O processamento começará assim que um worker estiver disponível.'
+                                : importRecord.status === 'processing'
+                                  ? 'Esta página atualiza o progresso automaticamente.'
+                                  : (importRecord.last_error ??
+                                    'O lote pode ser retomado a partir das linhas pendentes.')}
+                        </p>
+                        {importRecord.status !== 'failed' && (
+                            <div className="mt-5 grid gap-2">
+                                <progress
+                                    aria-label="Progresso da importação"
+                                    className="h-3 w-full accent-primary"
+                                    max={Math.max(importRecord.total_rows, 1)}
+                                    value={Math.min(
+                                        importRecord.processed_rows,
+                                        importRecord.total_rows,
+                                    )}
+                                />
+                                <p className="text-sm text-muted-foreground">
+                                    {importRecord.processed_rows} de{' '}
+                                    {importRecord.total_rows} linhas processadas
+                                </p>
+                            </div>
+                        )}
+                        {actionErrors.length > 0 && (
+                            <div
+                                role="alert"
+                                className="mt-4 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+                            >
+                                {actionErrors.map((message, index) => (
+                                    <p key={`${message}-${index}`}>{message}</p>
+                                ))}
+                            </div>
+                        )}
+                        {importRecord.status === 'failed' && (
+                            <Button
+                                type="button"
+                                onClick={resumeRows}
+                                disabled={actionForm.processing}
+                                className="mt-4"
+                            >
+                                {actionForm.processing
+                                    ? 'Retomando…'
+                                    : 'Retomar linhas pendentes'}
+                            </Button>
+                        )}
+                    </section>
+                )}
+
+                {importRecord.status === 'expired' && (
+                    <p
+                        role="status"
+                        className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4 text-sm text-muted-foreground"
+                    >
+                        O arquivo temporário expirou. Envie a planilha novamente
+                        para iniciar outra importação.
+                    </p>
+                )}
 
                 {fileError ? (
                     <section
@@ -288,7 +389,9 @@ export default function ImportShow({
 
                 {!fileError &&
                     preview &&
-                    importRecord.status !== 'completed' && (
+                    ['uploaded', 'previewed', 'mapped', 'validated'].includes(
+                        importRecord.status,
+                    ) && (
                         <form
                             onSubmit={saveMapping}
                             className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm shadow-black/[0.02] md:p-7"

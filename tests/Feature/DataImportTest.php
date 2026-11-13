@@ -3,8 +3,10 @@
 namespace Tests\Feature;
 
 use App\Domain\Imports\CompanyImportService;
+use App\Domain\Imports\DataImportProcessor;
 use App\Domain\Imports\SpreadsheetPreviewReader;
 use App\Domain\Tenancy\TenantContext;
+use App\Jobs\ProcessDataImportChunk;
 use App\Models\Company;
 use App\Models\Contact;
 use App\Models\DataImport;
@@ -15,6 +17,7 @@ use App\Models\User;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Inertia\Testing\AssertableInertia;
@@ -948,6 +951,40 @@ class DataImportTest extends TestCase
         $this->assertSame('A linha não pode ser importada no escopo de acesso atual.', $batch->validation_errors[0]['message']);
     }
 
+    public function test_a_salesperson_sees_a_duplicate_that_is_in_their_portfolio(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        Company::factory()->ownedBy($salesperson)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa da própria carteira',
+            'tax_id' => '12345678000195',
+        ]);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($salesperson)->withSession($session)->post('/imports', [
+            'record_type' => 'companies',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('companies.csv', "name,tax_id\nEmpresa Reimportada,12345678000195\n"),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0', 'tax_id' => '1'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($salesperson)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+
+        $batch = DataImport::query()->findOrFail($importId);
+        $this->assertSame(1, $batch->duplicate_rows);
+        $this->assertSame(0, $batch->invalid_rows);
+        $this->assertSame('duplicate', $batch->validation_errors[0]['type']);
+    }
+
     public function test_a_hidden_company_collision_during_confirmation_is_counted_as_invalid(): void
     {
         Storage::fake('local');
@@ -973,7 +1010,7 @@ class DataImportTest extends TestCase
             ->assertRedirect('/imports/'.$importId);
 
         $realService = new CompanyImportService;
-        $raceService = \Mockery::mock(CompanyImportService::class);
+        $raceService = \Mockery::mock(CompanyImportService::class)->makePartial();
         $raceService->shouldReceive('analyze')->once()->andReturnUsing(
             function (
                 DataImport $batch,
@@ -1056,6 +1093,396 @@ class DataImportTest extends TestCase
             'status' => 'completed',
             'mapping->name' => 0,
         ]);
+    }
+
+    public function test_large_company_import_is_queued_without_processing_inside_the_http_request(): void
+    {
+        Bus::fake();
+        config(['queue.default' => 'redis']);
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        $session = ['active_organization_id' => $organization->id];
+        $csv = "Name\n".implode("\n", array_map(
+            static fn (int $number): string => 'Empresa em lote '.$number,
+            range(1, 251),
+        ));
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'companies',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('companies.csv', $csv),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $importId,
+            'status' => 'queued',
+            'total_rows' => 251,
+            'valid_rows' => 251,
+            'queue_dispatches' => 1,
+        ]);
+        $this->assertDatabaseCount('companies', 0);
+        Bus::assertDispatched(ProcessDataImportChunk::class);
+    }
+
+    public function test_large_import_requires_an_asynchronous_queue_connection(): void
+    {
+        Bus::fake();
+        config(['queue.default' => 'sync']);
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        $session = ['active_organization_id' => $organization->id];
+        $csv = "Name\n".implode("\n", array_map(
+            static fn (int $number): string => 'Empresa protegida contra fila síncrona '.$number,
+            range(1, 251),
+        ));
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'companies',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('companies.csv', $csv),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => ['name' => '0'],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertSessionHasErrors('file');
+
+        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'status' => 'validated']);
+        $this->assertDatabaseCount('companies', 0);
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_import_job_processes_a_chunk_and_finishes_the_batch_atomically(): void
+    {
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'status' => 'queued',
+            'total_rows' => 1,
+            'valid_rows' => 1,
+            'processing_attempts' => 1,
+        ]);
+        app(DataImportProcessor::class)->stageRows($batch, [[
+            'line' => 2,
+            'attributes' => ['name' => 'Empresa importada pela fila', 'relationship_status' => 'customer'],
+        ]]);
+
+        app()->call([new ProcessDataImportChunk($organization->id, $batch->id, 1), 'handle']);
+
+        $this->assertDatabaseHas('companies', [
+            'organization_id' => $organization->id,
+            'name' => 'Empresa importada pela fila',
+        ]);
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $batch->id,
+            'status' => 'completed',
+            'processed_rows' => 1,
+            'created_rows' => 1,
+        ]);
+        $this->assertDatabaseHas('data_import_rows', [
+            'organization_id' => $organization->id,
+            'data_import_id' => $batch->id,
+            'status' => 'processed',
+            'encrypted_payload' => null,
+        ]);
+        $this->assertNull(app(TenantContext::class)->id());
+    }
+
+    public function test_queued_company_import_finishes_when_its_confirmed_journey_is_deactivated(): void
+    {
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $template = JourneyTemplate::query()->create([
+            'name' => 'Jornada confirmada antes da fila',
+            'type' => 'prospecting',
+            'trigger_type' => 'manual',
+            'is_active' => true,
+            'is_default' => false,
+        ]);
+        $template->steps()->create([
+            'title' => 'Contato inicial',
+            'position' => 1,
+            'delay_days' => 2,
+            'task_title' => 'Falar com {company}',
+            'task_type' => 'first_contact',
+            'task_priority' => 'normal',
+        ]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'status' => 'queued',
+            'journey_mode' => 'template',
+            'journey_template_id' => $template->id,
+            'total_rows' => 1,
+            'valid_rows' => 1,
+            'processing_attempts' => 1,
+        ]);
+        app(DataImportProcessor::class)->stageRows($batch, [[
+            'line' => 2,
+            'attributes' => ['name' => 'Prospecto da jornada confirmada', 'relationship_status' => 'prospect'],
+        ]]);
+        $template->update(['is_active' => false]);
+
+        app()->call([new ProcessDataImportChunk($organization->id, $batch->id, 1), 'handle']);
+
+        $company = Company::withoutGlobalScopes()
+            ->where('organization_id', $organization->id)
+            ->where('name', 'Prospecto da jornada confirmada')
+            ->firstOrFail();
+        $this->assertDatabaseHas('data_imports', ['id' => $batch->id, 'status' => 'completed', 'created_rows' => 1]);
+        $this->assertDatabaseHas('journey_enrollments', [
+            'organization_id' => $organization->id,
+            'journey_template_id' => $template->id,
+            'company_id' => $company->id,
+            'status' => 'active',
+        ]);
+    }
+
+    public function test_a_failed_import_can_resume_only_its_remaining_rows(): void
+    {
+        Bus::fake();
+        config(['queue.default' => 'redis']);
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $session = ['active_organization_id' => $organization->id];
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'status' => 'failed',
+            'total_rows' => 3,
+            'valid_rows' => 3,
+            'processed_rows' => 2,
+            'processing_attempts' => 1,
+            'created_rows' => 2,
+            'last_error' => 'A previous attempt failed.',
+        ]);
+        app(DataImportProcessor::class)->stageRows($batch, [
+            ['line' => 2, 'attributes' => ['name' => 'Já processada 1']],
+            ['line' => 3, 'attributes' => ['name' => 'Já processada 2']],
+            ['line' => 4, 'attributes' => ['name' => 'Pendente após falha']],
+        ]);
+        $batch->rows()->whereIn('line_number', [2, 3])->update([
+            'status' => 'processed',
+            'encrypted_payload' => null,
+            'processed_at' => now(),
+        ]);
+
+        $this->actingAs($owner)->withSession($session)
+            ->post('/imports/'.$batch->id.'/resume')
+            ->assertRedirect('/imports/'.$batch->id);
+
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $batch->id,
+            'status' => 'queued',
+            'processing_attempts' => 2,
+            'queue_dispatches' => 1,
+            'processed_rows' => 2,
+            'created_rows' => 2,
+            'last_error' => null,
+        ]);
+        Bus::assertDispatched(ProcessDataImportChunk::class, fn (ProcessDataImportChunk $job): bool => $job->organizationId === $organization->id
+            && $job->dataImportId === $batch->id
+            && $job->attemptNumber === 2
+        );
+    }
+
+    public function test_failed_import_cannot_resume_inline_on_a_synchronous_queue(): void
+    {
+        Bus::fake();
+        config(['queue.default' => 'sync']);
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'status' => 'failed',
+            'total_rows' => 1,
+            'valid_rows' => 1,
+            'processing_attempts' => 1,
+        ]);
+        app(DataImportProcessor::class)->stageRows($batch, [[
+            'line' => 2,
+            'attributes' => ['name' => 'Retomada assíncrona obrigatória'],
+        ]]);
+
+        $this->actingAs($owner)->withSession(['active_organization_id' => $organization->id])
+            ->post('/imports/'.$batch->id.'/resume')
+            ->assertSessionHasErrors('file');
+
+        $this->assertDatabaseHas('data_imports', ['id' => $batch->id, 'status' => 'failed', 'processing_attempts' => 1]);
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_a_partially_imported_failed_batch_cannot_reset_its_mapping_or_confirmed_rows(): void
+    {
+        Storage::fake('local');
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $path = 'imports/'.$organization->id.'/partial.csv';
+        Storage::disk('local')->put($path, "Name\nEmpresa já confirmada\n");
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'status' => 'failed',
+            'file_path' => $path,
+            'mapping' => ['name' => 0],
+            'total_rows' => 251,
+            'valid_rows' => 251,
+            'processed_rows' => 100,
+            'processing_attempts' => 1,
+            'created_rows' => 100,
+        ]);
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($owner)->withSession($session)
+            ->post('/imports/'.$batch->id.'/mapping', ['mapping' => ['name' => '0']])
+            ->assertSessionHasErrors('mapping');
+        $this->actingAs($owner)->withSession($session)
+            ->post('/imports/'.$batch->id.'/validate')
+            ->assertSessionHasErrors('file');
+
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $batch->id,
+            'status' => 'failed',
+            'processed_rows' => 100,
+            'created_rows' => 100,
+            'processing_attempts' => 1,
+        ]);
+    }
+
+    public function test_import_job_commits_one_chunk_and_queues_the_next_chunk(): void
+    {
+        Bus::fake();
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'status' => 'queued',
+            'total_rows' => 101,
+            'valid_rows' => 101,
+            'processing_attempts' => 1,
+        ]);
+        $stagedRows = [];
+
+        for ($line = 2; $line <= 102; $line++) {
+            $stagedRows[] = [
+                'line' => $line,
+                'attributes' => ['name' => 'Empresa em lote '.$line, 'relationship_status' => 'customer'],
+            ];
+        }
+
+        app(DataImportProcessor::class)->stageRows($batch, $stagedRows);
+
+        app()->call([new ProcessDataImportChunk($organization->id, $batch->id, 1), 'handle']);
+
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $batch->id,
+            'status' => 'processing',
+            'processed_rows' => 100,
+            'created_rows' => 100,
+            'last_processed_line' => 101,
+        ]);
+        $batch->refresh();
+        $this->assertNotNull($batch->processing_started_at);
+        $this->assertNotNull($batch->processing_heartbeat_at);
+        $this->assertTrue($batch->processing_heartbeat_at->greaterThanOrEqualTo($batch->processing_started_at));
+        $this->assertDatabaseCount('companies', 100);
+        $this->assertSame(1, DB::table('data_import_rows')->where('organization_id', $organization->id)->where('data_import_id', $batch->id)->where('status', 'pending')->count());
+        Bus::assertDispatched(ProcessDataImportChunk::class, fn (ProcessDataImportChunk $job): bool => $job->organizationId === $organization->id
+            && $job->dataImportId === $batch->id
+            && $job->attemptNumber === 1
+        );
+    }
+
+    public function test_an_import_job_cannot_process_another_organizations_batch_by_id(): void
+    {
+        $requestOrganization = Organization::factory()->create();
+        $otherOrganization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $requestOrganization->users()->attach($owner, ['role' => 'owner']);
+        $otherOrganization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($otherOrganization);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $otherOrganization->id,
+            'created_by' => $owner->id,
+            'status' => 'queued',
+            'total_rows' => 1,
+            'valid_rows' => 1,
+            'processing_attempts' => 1,
+        ]);
+        app(DataImportProcessor::class)->stageRows($batch, [[
+            'line' => 2,
+            'attributes' => ['name' => 'Não importar fora do tenant'],
+        ]]);
+        app(TenantContext::class)->set($requestOrganization);
+
+        app()->call([new ProcessDataImportChunk($requestOrganization->id, $batch->id, 1), 'handle']);
+
+        $this->assertDatabaseHas('data_imports', ['id' => $batch->id, 'status' => 'queued', 'processed_rows' => 0]);
+        $this->assertDatabaseMissing('companies', ['name' => 'Não importar fora do tenant']);
+        $this->assertNull(app(TenantContext::class)->id());
+    }
+
+    public function test_an_exhausted_import_job_does_not_store_exception_details(): void
+    {
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'status' => 'processing',
+            'processing_attempts' => 1,
+            'total_rows' => 1,
+            'valid_rows' => 1,
+        ]);
+
+        (new ProcessDataImportChunk($organization->id, $batch->id, 1))->failed(new \RuntimeException('customer-secret@example.com'));
+
+        $batch->refresh();
+        $this->assertSame('failed', $batch->status);
+        $this->assertStringNotContainsString('customer-secret@example.com', $batch->last_error);
+        $this->assertNull($batch->processing_started_at);
+        $this->assertNotNull($batch->failed_at);
+        $this->assertNull(app(TenantContext::class)->id());
     }
 
     public function test_import_page_only_lists_active_prospecting_templates_for_the_current_organization(): void

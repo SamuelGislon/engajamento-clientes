@@ -40,6 +40,7 @@ Route::middleware(['auth', 'verified'])->group(function (): void {
         Route::post('/imports/{dataImport}/mapping', [DataImportController::class, 'saveMapping'])->whereNumber('dataImport')->name('imports.mapping');
         Route::post('/imports/{dataImport}/validate', [DataImportController::class, 'validateImport'])->whereNumber('dataImport')->name('imports.validate');
         Route::post('/imports/{dataImport}/confirm', [DataImportController::class, 'confirm'])->whereNumber('dataImport')->name('imports.confirm');
+        Route::post('/imports/{dataImport}/resume', [DataImportController::class, 'resume'])->whereNumber('dataImport')->name('imports.resume');
         Route::get('/imports/{dataImport}', [DataImportController::class, 'show'])->whereNumber('dataImport')->name('imports.show');
         Route::get('/reports', CommercialReportController::class)->name('reports.index');
         Route::get('/teams', [TeamController::class, 'index'])->name('teams.index');

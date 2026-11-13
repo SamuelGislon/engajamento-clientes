@@ -19,6 +19,7 @@ type ImportRecord = {
     journey_mode: string;
     total_rows: number;
     valid_rows: number;
+    processed_rows: number;
     invalid_rows: number;
     created_rows: number;
     updated_rows: number;
@@ -395,7 +396,7 @@ export default function ImportsIndex({
                     ) : (
                         <>
                             <div className="overflow-x-auto">
-                                <table className="w-full min-w-[42rem] text-left text-sm">
+                                <table className="w-full min-w-[52rem] text-left text-sm">
                                     <thead className="bg-muted/25 text-xs text-muted-foreground">
                                         <tr>
                                             <th className="px-5 py-3 font-medium">
@@ -409,6 +410,9 @@ export default function ImportsIndex({
                                             </th>
                                             <th className="px-5 py-3 font-medium">
                                                 Jornadas
+                                            </th>
+                                            <th className="px-5 py-3 font-medium">
+                                                Progresso
                                             </th>
                                             <th className="px-5 py-3 font-medium">
                                                 Expira
@@ -448,7 +452,21 @@ export default function ImportsIndex({
                                                     ] ?? item.status}
                                                 </td>
                                                 <td className="px-5 py-3 text-muted-foreground">
-                                                    Não iniciadas
+                                                    {item.record_type !==
+                                                    'companies'
+                                                        ? 'Não se aplica'
+                                                        : item.journey_mode ===
+                                                            'none'
+                                                          ? 'Não iniciar'
+                                                          : item.journey_mode ===
+                                                              'default'
+                                                            ? 'Padrão'
+                                                            : 'Específica'}
+                                                </td>
+                                                <td className="px-5 py-3 text-muted-foreground">
+                                                    {item.total_rows > 0
+                                                        ? `${item.processed_rows} de ${item.total_rows}`
+                                                        : '—'}
                                                 </td>
                                                 <td className="px-5 py-3 text-muted-foreground">
                                                     {dateLabel(item.expires_at)}

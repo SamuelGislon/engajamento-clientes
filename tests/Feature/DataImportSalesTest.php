@@ -2,11 +2,15 @@
 
 namespace Tests\Feature;
 
+use App\Domain\Imports\DataImportProcessor;
+use App\Domain\Imports\SaleImportService;
 use App\Domain\Tenancy\TenantContext;
+use App\Jobs\ProcessDataImportChunk;
 use App\Models\Company;
 use App\Models\DataImport;
 use App\Models\Organization;
 use App\Models\Sale;
+use App\Models\Team;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -81,6 +85,82 @@ class DataImportSalesTest extends TestCase
             'status' => 'completed',
             'created_rows' => 1,
         ]);
+    }
+
+    public function test_queued_sales_import_rejects_sellers_whose_memberships_changed_after_validation(): void
+    {
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $inactiveSeller = User::factory()->create(['email' => 'inactive-seller@example.test']);
+        $removedFromTeamSeller = User::factory()->create(['email' => 'removed-team-seller@example.test']);
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        $organization->users()->attach($inactiveSeller, ['role' => 'salesperson']);
+        $organization->users()->attach($removedFromTeamSeller, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $team = Team::query()->create([
+            'name' => 'Equipe das vendas importadas',
+            'status' => 'active',
+            'created_by' => $owner->id,
+        ]);
+        assignTeamMember($organization, $team, $inactiveSeller, 'salesperson');
+        assignTeamMember($organization, $team, $removedFromTeamSeller, 'salesperson');
+        $firstCompany = Company::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa do vendedor desativado',
+            'team_id' => $team->id,
+        ]);
+        $secondCompany = Company::factory()->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa do vendedor removido da equipe',
+            'team_id' => $team->id,
+        ]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'record_type' => 'sales',
+            'status' => 'validated',
+            'mapping' => [
+                'company_name' => 0,
+                'seller_email' => 1,
+                'description' => 2,
+                'amount' => 3,
+                'currency' => 4,
+                'sold_at' => 5,
+                'status' => 6,
+            ],
+        ]);
+        $analysis = app(SaleImportService::class)->analyze($batch, $owner, [
+            [$firstCompany->name, $inactiveSeller->email, 'Venda bloqueada após revogação', '100.00', 'BRL', '2026-10-10', 'confirmed'],
+            [$secondCompany->name, $removedFromTeamSeller->email, 'Venda bloqueada após remoção da equipe', '200.00', 'BRL', '2026-10-11', 'confirmed'],
+        ], 2);
+        $this->assertCount(2, $analysis['validRows']);
+
+        $batch->update([
+            'status' => 'queued',
+            'total_rows' => 2,
+            'valid_rows' => 2,
+            'processing_attempts' => 1,
+        ]);
+        app(DataImportProcessor::class)->stageRows($batch, $analysis['validRows']);
+        DB::table('organization_user')
+            ->where('organization_id', $organization->id)
+            ->where('user_id', $inactiveSeller->id)
+            ->update(['is_active' => false, 'updated_at' => now()]);
+        DB::table('team_memberships')
+            ->where('organization_id', $organization->id)
+            ->where('team_id', $team->id)
+            ->where('user_id', $removedFromTeamSeller->id)
+            ->update(['is_active' => false, 'updated_at' => now()]);
+
+        app()->call([new ProcessDataImportChunk($organization->id, $batch->id, 1), 'handle']);
+
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $batch->id,
+            'status' => 'completed',
+            'created_rows' => 0,
+            'invalid_rows' => 2,
+        ]);
+        $this->assertDatabaseCount('sales', 0);
     }
 
     public function test_sales_import_rejects_a_seller_outside_the_importing_salesperson_authority(): void

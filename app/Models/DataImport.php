@@ -8,6 +8,7 @@ use Database\Factories\DataImportFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
  * @property int $organization_id
@@ -17,6 +18,13 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property list<array{line: int, type: string, message: string}>|null $validation_errors
  * @property CarbonImmutable $expires_at
  * @property CarbonImmutable|null $confirmed_at
+ * @property int $processed_rows
+ * @property int $processing_attempts
+ * @property int $queue_dispatches
+ * @property int|null $last_processed_line
+ * @property CarbonImmutable|null $processing_started_at
+ * @property CarbonImmutable|null $processing_heartbeat_at
+ * @property CarbonImmutable|null $failed_at
  */
 class DataImport extends Model
 {
@@ -42,6 +50,14 @@ class DataImport extends Model
         'updated_rows',
         'skipped_rows',
         'duplicate_rows',
+        'processed_rows',
+        'processing_attempts',
+        'queue_dispatches',
+        'last_processed_line',
+        'last_error',
+        'processing_started_at',
+        'processing_heartbeat_at',
+        'failed_at',
         'expires_at',
         'confirmed_at',
     ];
@@ -53,6 +69,9 @@ class DataImport extends Model
             'mapping' => 'array',
             'validation_errors' => 'array',
             'confirmed_at' => 'immutable_datetime',
+            'processing_started_at' => 'immutable_datetime',
+            'processing_heartbeat_at' => 'immutable_datetime',
+            'failed_at' => 'immutable_datetime',
         ];
     }
 
@@ -72,5 +91,11 @@ class DataImport extends Model
     public function team(): BelongsTo
     {
         return $this->belongsTo(Team::class);
+    }
+
+    /** @return HasMany<DataImportRow, $this> */
+    public function rows(): HasMany
+    {
+        return $this->hasMany(DataImportRow::class);
     }
 }
