@@ -15,7 +15,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property int $created_by
  * @property int|null $team_id
  * @property array<string, int>|null $mapping
- * @property list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, lines?: list<int>}>|null $validation_errors
+ * @property list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, can_update?: bool, duplicate_source?: 'file'|'database', lines?: list<int>}>|null $validation_errors
  * @property array<int|string, array{action: string, target_id?: int}>|null $duplicate_resolutions
  * @property CarbonImmutable $expires_at
  * @property CarbonImmutable|null $confirmed_at

@@ -20,8 +20,8 @@ use RuntimeException;
  *
  * @phpstan-type CompanyImportRow array{line: int, attributes: array<string, mixed>, resolution?: array{action: string, target_id?: int}}
  * @phpstan-type ContactImportRow array{line: int, identity: string, attributes: array<string, mixed>, company_id: int, roles: list<string>, is_primary: bool, relationship_notes: string|null, resolution?: array{action: string, target_id?: int}}
- * @phpstan-type SaleImportRow array{line: int, external_id: string|null, company_id: int, seller_id: int, description: string, amount: string, currency: string, sold_at: string, status: string, notes: string|null}
- * @phpstan-type ImportValidationError array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, email_masked?: string|null, phone_masked?: string|null, city?: string|null, state?: string|null, tax_id_masked?: string|null}>, can_create?: bool, lines?: list<int>}
+ * @phpstan-type SaleImportRow array{line: int, external_id: string|null, company_id: int, seller_id: int, description: string, amount: string, currency: string, sold_at: string, status: string, notes: string|null, resolution?: array{action: string, target_id?: int}}
+ * @phpstan-type ImportValidationError array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, email_masked?: string|null, phone_masked?: string|null, city?: string|null, state?: string|null, tax_id_masked?: string|null, detail?: string}>, can_create?: bool, can_update?: bool, duplicate_source?: 'file'|'database', lines?: list<int>}
  */
 class DataImportProcessor
 {
@@ -276,6 +276,21 @@ class DataImportProcessor
         foreach ($this->decodeRows($stagedRows) as $row) {
             $externalId = $row['external_id'] ?? null;
             $notes = $row['notes'] ?? null;
+            $resolution = null;
+            $rawResolution = $row['resolution'] ?? null;
+
+            if ($rawResolution !== null) {
+                if (! is_array($rawResolution)
+                    || ($rawResolution['action'] ?? null) !== 'update'
+                    || ! is_int($rawResolution['target_id'] ?? null)) {
+                    throw new RuntimeException('The staged sale import resolution is invalid.');
+                }
+
+                $resolution = [
+                    'action' => 'update',
+                    'target_id' => $rawResolution['target_id'],
+                ];
+            }
 
             if (! is_int($row['line'] ?? null)
                 || (! is_string($externalId) && $externalId !== null)
@@ -301,6 +316,7 @@ class DataImportProcessor
                 'sold_at' => $row['sold_at'],
                 'status' => $row['status'],
                 'notes' => $notes,
+                ...($resolution !== null ? ['resolution' => $resolution] : []),
             ];
         }
 

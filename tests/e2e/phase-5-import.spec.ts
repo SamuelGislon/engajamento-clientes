@@ -280,6 +280,60 @@ test('owner imports a historical sale with an authorized seller', async ({
     await expect(page.getByText(description, { exact: true })).toBeVisible();
 });
 
+test('owner explicitly updates a visible sale duplicate by external id', async ({
+    page,
+}) => {
+    test.setTimeout(90_000);
+    const description = 'Pedido atualizado pela importação E2E';
+
+    await signIn(page, 'owner@example.test');
+    await page.goto('/imports');
+    await page.getByLabel('O que você está importando?').selectOption('sales');
+    await page.getByLabel('Arquivo CSV ou Excel').setInputFiles({
+        name: 'sales-update.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from(
+            [
+                'External ID,Company name,Seller email,Description,Amount,Currency,Sold at,Status',
+                `demo-crescente-3,Escritório Crescente,bruno@example.test,${description},23500.50,BRL,2026-11-01,confirmed`,
+            ].join('\n'),
+        ),
+    });
+    await page.getByRole('button', { name: 'Enviar para prévia' }).click();
+    await page.getByRole('link', { name: 'sales-update.csv' }).click();
+    await page.getByLabel('Identificador externo').selectOption('0');
+    await page.getByLabel('Nome da empresa').selectOption('1');
+    await page.getByLabel('E-mail do vendedor').selectOption('2');
+    await page.getByLabel('Descrição da venda').selectOption('3');
+    await page.getByLabel('Valor decimal').selectOption('4');
+    await page.getByLabel('Moeda').selectOption('5');
+    await page.getByLabel('Data e hora da venda').selectOption('6');
+    await page.getByLabel('Situação (confirmed/cancelled)').selectOption('7');
+    await page.getByRole('button', { name: 'Salvar mapeamento' }).click();
+    await page.getByRole('button', { name: 'Validar todas as linhas' }).click();
+
+    await expect(
+        page.getByRole('heading', { name: 'Decisões para vendas duplicadas' }),
+    ).toBeVisible();
+    await expect(page.getByText(/Pedido recente em expansão/)).toBeVisible();
+    await page.getByLabel('Ação', { exact: true }).selectOption('update');
+    await page
+        .getByRole('button', { name: 'Salvar decisões e revalidar' })
+        .click();
+    await expect(
+        page.getByRole('button', { name: 'Confirmar importação' }),
+    ).toBeEnabled({ timeout: 30_000 });
+
+    await page.getByRole('button', { name: 'Confirmar importação' }).click();
+    await expect(
+        page.getByRole('heading', { name: 'Resultado da importação' }),
+    ).toBeVisible();
+    await expect(page.getByText('Atualizadas')).toBeVisible();
+
+    await page.goto('/sales');
+    await expect(page.getByText(description, { exact: true })).toBeVisible();
+});
+
 test('owner sees why confirmation stops when its destination team becomes inactive', async ({
     page,
 }) => {

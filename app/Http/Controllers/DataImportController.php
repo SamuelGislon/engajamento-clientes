@@ -25,6 +25,7 @@ use App\Models\Contact;
 use App\Models\DataImport;
 use App\Models\JourneyTemplate;
 use App\Models\Organization;
+use App\Models\Sale;
 use App\Models\Team;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -311,7 +312,7 @@ class DataImportController extends Controller
             $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
             Gate::forUser($request->user())->authorize('update', $batch);
 
-            if ($batch->status !== 'validated' || ! in_array($batch->record_type, ['companies', 'contacts'], true)) {
+            if ($batch->status !== 'validated' || ! in_array($batch->record_type, ['companies', 'contacts', 'sales'], true)) {
                 throw ValidationException::withMessages(['resolutions' => 'As decisões de duplicidade não podem mais ser alteradas neste lote.']);
             }
 
@@ -348,6 +349,10 @@ class DataImportController extends Controller
 
                 if ($action === 'create' && ($error['can_create'] ?? false) !== true) {
                     throw ValidationException::withMessages(['resolutions' => 'Esta linha possui um identificador único já utilizado e não pode criar outro registro.']);
+                }
+
+                if (in_array($action, ['update', 'resolve'], true) && ($error['can_update'] ?? true) !== true) {
+                    throw ValidationException::withMessages(['resolutions' => 'Você não tem autorização para atualizar esta venda. Ignore a linha.']);
                 }
 
                 if ($action === 'update') {
@@ -759,12 +764,12 @@ class DataImportController extends Controller
         }
     }
 
-    /** @return list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, lines?: list<int>}> */
+    /** @return list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, can_update?: bool, duplicate_source?: 'file'|'database', lines?: list<int>}> */
     private function visibleValidationErrors(DataImport $record, User $actor): array
     {
         $errors = $record->validation_errors ?? [];
 
-        if (! in_array($record->record_type, ['companies', 'contacts'], true)) {
+        if (! in_array($record->record_type, ['companies', 'contacts', 'sales'], true)) {
             return $errors;
         }
 
@@ -813,6 +818,51 @@ class DataImportController extends Controller
             }, $errors);
         }
 
+        if ($record->record_type === 'sales') {
+            $visibleSales = Sale::query()
+                ->where('organization_id', $record->organization_id)
+                ->visibleTo($actor)
+                ->whereKey($candidateIds)
+                ->with('company:id,name')
+                ->get(['id', 'company_id', 'description', 'amount', 'sold_at', 'status'])
+                ->keyBy('id');
+
+            return array_map(function (array $error) use ($visibleSales): array {
+                if ($error['type'] !== 'duplicate') {
+                    return $error;
+                }
+
+                $candidates = array_values(array_filter(array_map(function (array $candidate) use ($visibleSales): ?array {
+                    $sale = $visibleSales->get((int) $candidate['id']);
+
+                    if (! $sale instanceof Sale) {
+                        return null;
+                    }
+
+                    $company = $sale->company;
+
+                    return [
+                        'id' => $sale->id,
+                        'name' => $company->name,
+                        'detail' => trim($sale->description).' · R$ '.number_format((float) $sale->amount, 2, ',', '.')
+                            .' · '.$sale->sold_at->format('Y-m-d').' · '.($sale->status === 'confirmed' ? 'confirmada' : 'cancelada'),
+                    ];
+                }, $error['candidates'] ?? []), static fn (?array $candidate): bool => $candidate !== null));
+
+                if ($candidates === []) {
+                    if (($error['duplicate_source'] ?? null) === 'file') {
+                        return $error;
+                    }
+
+                    return $this->inaccessibleDuplicateError($error);
+                }
+
+                $error['candidates'] = $candidates;
+
+                return $error;
+            }, $errors);
+        }
+
         $visibleCompanies = Company::query()
             ->where('organization_id', $record->organization_id)
             ->visibleTo($actor)
@@ -852,7 +902,7 @@ class DataImportController extends Controller
     }
 
     /**
-     * @param  list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, lines?: list<int>}>  $visibleErrors
+     * @param  list<array{line: int, type: string, message: string, candidates?: list<array<string, mixed>>, can_create?: bool, can_update?: bool, duplicate_source?: 'file'|'database', lines?: list<int>}>  $visibleErrors
      */
     private function hiddenDuplicateRows(
         DataImport $record,
@@ -860,7 +910,7 @@ class DataImportController extends Controller
         bool $isOrganizationAdministrator,
         array $visibleErrors,
     ): int {
-        if (! in_array($record->record_type, ['companies', 'contacts'], true)) {
+        if (! in_array($record->record_type, ['companies', 'contacts', 'sales'], true)) {
             return 0;
         }
 
@@ -892,7 +942,7 @@ class DataImportController extends Controller
         User $actor,
         bool $isOrganizationAdministrator,
     ): array {
-        $candidateIds = ['companies' => [], 'contacts' => []];
+        $candidateIds = ['companies' => [], 'contacts' => [], 'sales' => []];
 
         foreach ($imports as $record) {
             if (! array_key_exists($record->record_type, $candidateIds)) {
@@ -930,10 +980,20 @@ class DataImportController extends Controller
                     ->pluck('id')
                     ->map(static fn (int|string $id): int => (int) $id)
                     ->all(),
+            'sales' => $candidateIds['sales'] === []
+                ? []
+                : Sale::query()
+                    ->where('organization_id', $organizationId)
+                    ->visibleTo($actor)
+                    ->whereKey(array_unique($candidateIds['sales']))
+                    ->pluck('id')
+                    ->map(static fn (int|string $id): int => (int) $id)
+                    ->all(),
         ];
         $visibleLookup = [
             'companies' => array_fill_keys($visibleIds['companies'], true),
             'contacts' => array_fill_keys($visibleIds['contacts'], true),
+            'sales' => array_fill_keys($visibleIds['sales'], true),
         ];
         $hiddenRows = [];
 
@@ -950,6 +1010,10 @@ class DataImportController extends Controller
                 ->sum(fn (array $error): int => count($error['lines'] ?? [$error['line']]));
             $hiddenCount = $duplicateErrors
                 ->sum(function (array $error) use ($visibleCandidates): int {
+                    if (($error['duplicate_source'] ?? null) === 'file') {
+                        return 0;
+                    }
+
                     foreach ($error['candidates'] ?? [] as $candidate) {
                         if (isset($visibleCandidates[(int) $candidate['id']])) {
                             return 0;

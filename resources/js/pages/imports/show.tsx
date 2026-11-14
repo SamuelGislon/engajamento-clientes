@@ -61,6 +61,7 @@ type DuplicateCandidate = {
     tax_id_masked?: string | null;
     email_masked?: string | null;
     phone_masked?: string | null;
+    detail?: string;
 };
 type ImportValidationError = {
     line: number;
@@ -68,6 +69,8 @@ type ImportValidationError = {
     message: string;
     candidates?: DuplicateCandidate[];
     can_create?: boolean;
+    can_update?: boolean;
+    duplicate_source?: 'file' | 'database';
     lines?: number[];
 };
 
@@ -763,7 +766,7 @@ export default function ImportShow({
                                 )}
                             </div>
                         )}
-                        {['companies', 'contacts'].includes(
+                        {['companies', 'contacts', 'sales'].includes(
                             importRecord.record_type,
                         ) &&
                             duplicateErrors.length > 0 && (
@@ -772,13 +775,15 @@ export default function ImportShow({
                                         {importRecord.record_type ===
                                         'companies'
                                             ? 'Decisões para empresas duplicadas'
-                                            : 'Decisões para contatos duplicados'}
+                                            : importRecord.record_type ===
+                                                'contacts'
+                                              ? 'Decisões para contatos duplicados'
+                                              : 'Decisões para vendas duplicadas'}
                                     </h3>
                                     <p className="mt-1 text-sm text-muted-foreground">
-                                        Escolha uma ação para cada pessoa ou
-                                        empresa. Atualizações alteram somente
-                                        campos preenchidos no mapeamento;
-                                        vínculos existentes são preservados.
+                                        {importRecord.record_type === 'sales'
+                                            ? 'O identificador externo já existe nesta organização. Você pode atualizar a venda visível correspondente ou ignorar a linha.'
+                                            : 'Escolha uma ação para cada pessoa ou empresa. Atualizações alteram somente campos preenchidos no mapeamento; vínculos existentes são preservados.'}
                                     </p>
                                     <div className="mt-4 grid gap-3">
                                         {duplicateErrors.map((error) => {
@@ -815,6 +820,7 @@ export default function ImportShow({
                                                                                   candidate.name,
                                                                                   candidate.city,
                                                                                   candidate.state,
+                                                                                  candidate.detail,
                                                                                   `Registro #${candidate.id}`,
                                                                                   candidate.tax_id_masked
                                                                                       ? `CNPJ ${candidate.tax_id_masked}`
@@ -834,7 +840,10 @@ export default function ImportShow({
                                                                       .join(
                                                                           ' / ',
                                                                       )
-                                                                : 'Não há um registro correspondente visível nesta revisão.'}
+                                                                : error.duplicate_source ===
+                                                                    'file'
+                                                                  ? 'Este identificador externo também aparece em outra linha deste arquivo.'
+                                                                  : 'Não há um registro correspondente visível nesta revisão.'}
                                                         </p>
                                                     </div>
                                                     <div className="grid gap-2">
@@ -867,13 +876,15 @@ export default function ImportShow({
                                                                 </option>
                                                             )}
                                                             {candidates.length ===
-                                                                1 && (
-                                                                <option value="update">
-                                                                    Atualizar
-                                                                    registro
-                                                                    correspondente
-                                                                </option>
-                                                            )}
+                                                                1 &&
+                                                                error.can_update !==
+                                                                    false && (
+                                                                    <option value="update">
+                                                                        Atualizar
+                                                                        registro
+                                                                        correspondente
+                                                                    </option>
+                                                                )}
                                                             {candidates.length >
                                                                 1 && (
                                                                 <option value="resolve">

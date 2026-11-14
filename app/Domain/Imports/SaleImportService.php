@@ -18,6 +18,7 @@ use DateTimeZone;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
 
@@ -28,15 +29,15 @@ class SaleImportService
      * @param  list<int>  $malformedRows
      * @return array{
      *     totalRows: int,
-     *     validRows: list<array{line: int, external_id: string|null, company_id: int, seller_id: int, description: string, amount: string, currency: string, sold_at: string, status: string, notes: string|null}>,
+     *     validRows: list<array{line: int, external_id: string|null, company_id: int, seller_id: int, description: string, amount: string, currency: string, sold_at: string, status: string, notes: string|null, resolution?: array{action: string, target_id?: int}}>,
      *     invalidRows: int,
      *     duplicateRows: int,
-     *     errors: list<array{line: int, type: string, message: string}>
+     *     errors: list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, detail?: string}>, can_create?: bool, can_update?: bool, duplicate_source?: 'file'|'database'}>
      * }
      */
     public function analyze(DataImport $batch, User $actor, array $rows, int $totalRows, bool $lockDestination = false, array $malformedRows = []): array
     {
-        $this->assertImporter($batch, $actor, $lockDestination);
+        $this->assertImporter($batch, $actor, false);
         $mapping = is_array($batch->mapping) ? $batch->mapping : [];
         $fields = app(SaleImportFields::class)->options();
         $preparedRows = [];
@@ -112,35 +113,50 @@ class SaleImportService
             $preparedRows[] = ['line' => $line, 'attributes' => $attributes];
         }
 
-        $companyCatalog = $this->companyCatalog($batch, $actor, $preparedRows, $lockDestination);
-        $sellerCatalog = $this->sellerCatalog($batch, $preparedRows);
-        $teamMemberships = $this->teamMembershipCatalog($batch, $actor, $companyCatalog, $sellerCatalog, $lockDestination);
-        $sellerCatalog = $this->lockSellerMemberships($batch, $sellerCatalog, $lockDestination);
+        $companyCandidates = $this->companyCatalog($batch, $actor, $preparedRows, false);
         $externalIds = array_values(array_unique(array_filter(array_map(
             static fn (array $prepared): ?string => $prepared['attributes']['external_id'],
             $preparedRows,
         ), static fn (?string $externalId): bool => $externalId !== null)));
         $existingSales = new EloquentCollection;
 
-        foreach (array_chunk($externalIds, 500) as $externalIdChunk) {
-            $existingSales = $existingSales->merge(Sale::query()
+        if ($externalIds !== []) {
+            $existingSales = Sale::query()
                 ->where('organization_id', $batch->organization_id)
-                ->whereIn('external_id', $externalIdChunk)
+                ->whereIn('external_id', $externalIds)
+                ->orderBy('id')
                 ->when($lockDestination, fn ($sales) => $sales->lockForUpdate())
-                ->get(['id', 'external_id']));
+                ->get(['id', 'external_id', 'company_id']);
         }
 
-        $visibleExistingSaleIds = Sale::query()
+        if ($lockDestination) {
+            $lockedCompanyIds = $this->lockImportReferences($batch, $actor, array_values($companyCandidates->modelKeys()), $existingSales);
+            $this->assertImporter($batch, $actor, true);
+            $companyCatalog = $this->companyCatalog($batch, $actor, $preparedRows, false)
+                ->whereIn('id', $lockedCompanyIds)
+                ->values();
+        } else {
+            $companyCatalog = $companyCandidates;
+        }
+
+        $sellerCatalog = $this->sellerCatalog($batch, $preparedRows);
+        $teamMemberships = $this->teamMembershipCatalog($batch, $actor, $companyCatalog, $sellerCatalog, $lockDestination);
+        $sellerCatalog = $this->lockSellerMemberships($batch, $sellerCatalog, $lockDestination);
+
+        $visibleExistingSales = Sale::query()
             ->where('organization_id', $batch->organization_id)
             ->visibleTo($actor)
             ->whereIn('id', $existingSales->modelKeys())
-            ->pluck('id')
-            ->map(static fn (int|string $id): int => (int) $id)
-            ->all();
+            ->with('company:id,name')
+            ->get(['id', 'company_id', 'seller_id', 'created_by', 'external_id', 'description', 'amount', 'sold_at', 'status'])
+            ->keyBy('external_id');
         $existingExternalIds = [];
 
         foreach ($existingSales as $existingSale) {
-            $existingExternalIds[$existingSale->external_id] = in_array((int) $existingSale->id, $visibleExistingSaleIds, true);
+            $existingExternalIds[$existingSale->external_id] = $visibleExistingSales->get($existingSale->external_id);
+            if ($existingExternalIds[$existingSale->external_id] === null) {
+                $existingExternalIds[$existingSale->external_id] = false;
+            }
         }
 
         $seenExternalIds = [];
@@ -173,32 +189,76 @@ class SaleImportService
             }
 
             $externalId = $attributes['external_id'];
-            if ($externalId !== null && isset($existingExternalIds[$externalId])) {
-                if (! $existingExternalIds[$externalId]) {
-                    $invalidRows++;
-                    $this->appendError($errors, $line, 'invalid', 'A linha não pode ser importada no escopo de acesso atual.');
-
-                    continue;
-                }
-
-                $duplicateRows++;
-                $this->appendError($errors, $line, 'duplicate', 'O identificador externo já existe nesta organização; a linha será ignorada.');
-
-                continue;
-            }
-
-            if ($externalId !== null && isset($seenExternalIds[$externalId])) {
-                $duplicateRows++;
-                $this->appendError($errors, $line, 'duplicate', 'Identificador externo repetido no arquivo; a linha será ignorada.');
-
-                continue;
-            }
-
+            $isRepeatedFileIdentifier = $externalId !== null && isset($seenExternalIds[$externalId]);
             if ($externalId !== null) {
                 $seenExternalIds[$externalId] = true;
             }
 
-            $validRows[] = [
+            if ($externalId !== null && isset($existingExternalIds[$externalId])) {
+                $existingSale = $existingExternalIds[$externalId];
+                if ($existingSale === false) {
+                    if ($isRepeatedFileIdentifier) {
+                        $duplicateRows++;
+                        $this->appendError(
+                            $errors,
+                            $line,
+                            'duplicate',
+                            'Identificador externo repetido no arquivo; somente a primeira linha pode ser importada.',
+                            ['duplicate_source' => 'file'],
+                        );
+                    } else {
+                        $invalidRows++;
+                        $this->appendError($errors, $line, 'invalid', 'A linha não pode ser importada no escopo de acesso atual.');
+                    }
+
+                    continue;
+                }
+
+                $resolution = $this->requestedResolution($batch, $line);
+                $requestedTargetId = $resolution['target_id'] ?? null;
+                $canUpdate = ! $isRepeatedFileIdentifier && Gate::forUser($actor)->allows('update', $existingSale);
+                $hasAuthorizedUpdate = $canUpdate
+                    && is_int($requestedTargetId)
+                    && $requestedTargetId === $existingSale->id
+                    && in_array($resolution['action'] ?? null, ['update', 'resolve'], true);
+
+                if (($resolution['action'] ?? null) === 'ignore' || $isRepeatedFileIdentifier) {
+                    $duplicateRows++;
+                    if (($resolution['action'] ?? null) !== 'ignore') {
+                        $this->appendSaleDuplicateError($errors, $line, $existingSale, false, 'Identificador externo repetido no arquivo; somente a primeira linha pode atualizar a venda existente.', 'file');
+                    }
+
+                    continue;
+                }
+
+                if (! $hasAuthorizedUpdate) {
+                    $duplicateRows++;
+                    $message = $canUpdate
+                        ? 'O identificador externo já existe nesta organização. Escolha atualizar a venda correspondente ou ignorar a linha.'
+                        : 'A venda existente pode ser visualizada, mas não pode ser atualizada pelo seu acesso atual. Ignore esta linha.';
+                    $this->appendSaleDuplicateError($errors, $line, $existingSale, $canUpdate, $message);
+
+                    continue;
+                }
+
+                $resolution = [
+                    'action' => 'update',
+                    'target_id' => (int) $existingSale->id,
+                ];
+            } elseif ($isRepeatedFileIdentifier) {
+                $duplicateRows++;
+                $this->appendError($errors, $line, 'duplicate', 'Identificador externo repetido no arquivo; somente a primeira linha será importada.', [
+                    'can_create' => false,
+                    'can_update' => false,
+                    'duplicate_source' => 'file',
+                ]);
+
+                continue;
+            } else {
+                $resolution = null;
+            }
+
+            $validRow = [
                 'line' => $line,
                 'external_id' => $externalId,
                 'company_id' => $company->id,
@@ -210,6 +270,12 @@ class SaleImportService
                 'status' => $attributes['status'],
                 'notes' => $attributes['notes'] ?? null,
             ];
+
+            if ($resolution !== null) {
+                $validRow['resolution'] = $resolution;
+            }
+
+            $validRows[] = $validRow;
         }
 
         return [
@@ -222,8 +288,8 @@ class SaleImportService
     }
 
     /**
-     * @param  list<array{line: int, external_id: string|null, company_id: int, seller_id: int, description: string, amount: string, currency: string, sold_at: string, status: string, notes: string|null}>  $validRows
-     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string}>}
+     * @param  list<array{line: int, external_id: string|null, company_id: int, seller_id: int, description: string, amount: string, currency: string, sold_at: string, status: string, notes: string|null, resolution?: array{action: string, target_id?: int}}>  $validRows
+     * @return array{createdRows: int, updatedRows: int, duplicateRows: int, invalidRows: int, errors: list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, detail?: string}>, can_create?: bool, can_update?: bool}>}
      */
     public function import(
         DataImport $batch,
@@ -233,7 +299,43 @@ class SaleImportService
         CommercialInactivityService $inactivity,
         JourneyService $journeys,
     ): array {
+        $destinationCompanyIds = [];
+        $targetSaleIds = [];
+        $targetExternalIds = [];
+        $targetSalePairs = [];
+
+        foreach ($validRows as $row) {
+            $destinationCompanyIds[] = $row['company_id'];
+            $resolution = $row['resolution'] ?? null;
+
+            if (($resolution['action'] ?? null) !== 'update'
+                || ! is_int($resolution['target_id'] ?? null)
+                || $row['external_id'] === null) {
+                continue;
+            }
+
+            $targetSaleIds[] = $resolution['target_id'];
+            $targetExternalIds[] = $row['external_id'];
+            $targetSalePairs[$resolution['target_id'].':'.$row['external_id']] = true;
+        }
+
+        $existingSales = $targetSaleIds === []
+            ? new EloquentCollection
+            : Sale::query()
+                ->where('organization_id', $batch->organization_id)
+                ->whereIn('id', array_values(array_unique($targetSaleIds)))
+                ->whereIn('external_id', array_values(array_unique($targetExternalIds)))
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get(['id', 'company_id', 'external_id'])
+                ->filter(static fn (Sale $sale): bool => isset($targetSalePairs[$sale->id.':'.$sale->external_id]))
+                ->values();
+
+        $destinationCompanyIds = array_values(array_unique($destinationCompanyIds));
+        $this->lockImportReferences($batch, $actor, $destinationCompanyIds, $existingSales);
+
         $createdRows = 0;
+        $updatedRows = 0;
         $duplicateRows = 0;
         $invalidRows = 0;
         $errors = [];
@@ -262,10 +364,6 @@ class SaleImportService
                 continue;
             }
 
-            $isFirstPurchase = $row['status'] === 'confirmed'
-                && $company->relationship_status === 'prospect'
-                && ! $company->sales()->where('status', 'confirmed')->exists();
-
             $saleAttributes = [
                 'organization_id' => $batch->organization_id,
                 'company_id' => $company->id,
@@ -282,23 +380,85 @@ class SaleImportService
                 'cancelled_at' => $row['status'] === 'cancelled' ? now() : null,
                 'cancelled_by' => $row['status'] === 'cancelled' ? $actor->id : null,
             ];
-            $sale = $row['external_id'] === null
+            $resolution = $row['resolution'] ?? null;
+            $existingSale = null;
+            $sourceCompany = null;
+
+            if (($resolution['action'] ?? null) === 'update') {
+                $targetId = $resolution['target_id'] ?? null;
+                if (! is_int($targetId) || $row['external_id'] === null) {
+                    $invalidRows++;
+                    $this->appendError($errors, $row['line'], 'invalid', 'A decisão de atualização não corresponde a uma venda válida. Revise a linha antes de continuar.');
+
+                    continue;
+                }
+
+                $existingSale = Sale::query()
+                    ->where('organization_id', $batch->organization_id)
+                    ->where('external_id', $row['external_id'])
+                    ->visibleTo($actor)
+                    ->whereKey($targetId)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($existingSale === null) {
+                    $invalidRows++;
+                    $this->appendError($errors, $row['line'], 'invalid', 'A venda escolhida deixou de corresponder ao identificador externo ou não está mais acessível. Revise a linha antes de continuar.');
+
+                    continue;
+                }
+
+                $sourceCompany = Company::query()
+                    ->where('organization_id', $batch->organization_id)
+                    ->lockForUpdate()
+                    ->find($existingSale->company_id);
+
+                if ($sourceCompany === null
+                    || ! $this->lockManagerSourceTeamMembership($batch, $actor, $sourceCompany)
+                    || ! Gate::forUser($actor)->allows('update', $existingSale)) {
+                    $invalidRows++;
+                    $this->appendError($errors, $row['line'], 'invalid', 'A venda escolhida deixou de estar autorizada para atualização. Revise a linha antes de continuar.');
+
+                    continue;
+                }
+            }
+
+            $isFirstPurchase = $row['status'] === 'confirmed'
+                && $company->relationship_status === 'prospect'
+                && ! $company->sales()
+                    ->where('status', 'confirmed')
+                    ->when($existingSale !== null, fn ($sales) => $sales->whereKeyNot($existingSale->id))
+                    ->exists();
+
+            $sale = $existingSale ?? ($row['external_id'] === null
                 ? Sale::query()->create($saleAttributes)
                 : Sale::query()->firstOrCreate(
                     ['organization_id' => $batch->organization_id, 'external_id' => $row['external_id']],
                     $saleAttributes,
-                );
+                ));
 
-            if (! $sale->wasRecentlyCreated) {
+            if ($existingSale !== null) {
+                $previousCompanyId = (int) $sale->company_id;
+                $updateAttributes = $saleAttributes;
+                unset($updateAttributes['created_by']);
+                $sale->update($updateAttributes);
+                $updatedRows++;
+
+                if ($previousCompanyId !== (int) $company->id) {
+                    $inactivity->refreshCommercialForCompany($sourceCompany);
+                    $scores->recalculateForCompany($sourceCompany, 'Venda histórica importada');
+                }
+            } elseif (! $sale->wasRecentlyCreated) {
                 $canSeeExistingSale = Sale::query()
                     ->where('organization_id', $batch->organization_id)
                     ->visibleTo($actor)
                     ->whereKey($sale->id)
-                    ->exists();
+                    ->with('company:id,name')
+                    ->first();
 
                 if ($canSeeExistingSale) {
                     $duplicateRows++;
-                    $this->appendError($errors, $row['line'], 'duplicate', 'O identificador externo foi importado por outro processo; a linha foi ignorada.');
+                    $this->appendSaleDuplicateError($errors, $row['line'], $canSeeExistingSale, false, 'O identificador externo foi importado por outro processo; a linha foi ignorada. Valide o lote novamente para escolher uma ação.');
                 } else {
                     $invalidRows++;
                     $this->appendError($errors, $row['line'], 'invalid', 'A linha não pode ser importada no escopo de acesso atual.');
@@ -326,17 +486,50 @@ class SaleImportService
             }
 
             $scores->recalculateForCompany($company, $row['status'] === 'confirmed' ? 'Venda histórica importada' : 'Venda cancelada importada');
-            $createdRows++;
+            if ($existingSale === null) {
+                $createdRows++;
+            }
             unset($sale);
         }
 
         return [
             'createdRows' => $createdRows,
-            'updatedRows' => 0,
+            'updatedRows' => $updatedRows,
             'duplicateRows' => $duplicateRows,
             'invalidRows' => $invalidRows,
             'errors' => $errors,
         ];
+    }
+
+    /**
+     * @param  list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, detail?: string}>, can_create?: bool, can_update?: bool, duplicate_source?: 'file'|'database'}>  $errors
+     * @param  'file'|'database'  $source
+     */
+    private function appendSaleDuplicateError(array &$errors, int $line, Sale $sale, bool $canUpdate, string $message, string $source = 'database'): void
+    {
+        $company = $sale->company;
+        $soldAt = $sale->sold_at->format('Y-m-d');
+        $details = trim($sale->description).' · R$ '.number_format((float) $sale->amount, 2, ',', '.')
+            .' · '.$soldAt.' · '.($sale->status === 'confirmed' ? 'confirmada' : 'cancelada');
+
+        $this->appendError($errors, $line, 'duplicate', $message, [
+            'candidates' => [[
+                'id' => (int) $sale->id,
+                'name' => $company instanceof Company ? $company->name : 'Venda existente',
+                'detail' => $details,
+            ]],
+            'can_create' => false,
+            'can_update' => $canUpdate,
+            'duplicate_source' => $source,
+        ]);
+    }
+
+    /** @return array{action: string, target_id?: int}|null */
+    private function requestedResolution(DataImport $batch, int $line): ?array
+    {
+        $resolution = ($batch->duplicate_resolutions ?? [])[(string) $line] ?? ($batch->duplicate_resolutions ?? [])[$line] ?? null;
+
+        return is_array($resolution) ? $resolution : null;
     }
 
     private function authorizedSellerForImport(DataImport $batch, User $actor, Company $company, int $sellerId): ?User
@@ -434,6 +627,104 @@ class SaleImportService
         if ($role === 'salesperson' && $batch->team_id !== null && ! $this->hasActiveTeamMembership($batch, $actor, 'salesperson', $lockDestination)) {
             throw ValidationException::withMessages(['team_id' => 'Você não faz mais parte da equipe de destino selecionada.']);
         }
+    }
+
+    private function lockManagerSourceTeamMembership(DataImport $batch, User $actor, Company $sourceCompany): bool
+    {
+        if ($actor->roleIn($batch->organization_id) !== 'manager') {
+            return true;
+        }
+
+        if ($sourceCompany->team_id === null) {
+            return false;
+        }
+
+        $team = Team::query()
+            ->where('organization_id', $batch->organization_id)
+            ->whereKey($sourceCompany->team_id)
+            ->lockForUpdate()
+            ->first(['id', 'status']);
+
+        if ($team === null || $team->status !== 'active') {
+            return false;
+        }
+
+        $membership = DB::table('team_memberships')
+            ->where('organization_id', $batch->organization_id)
+            ->where('team_id', $team->id)
+            ->where('user_id', $actor->id)
+            ->where('role', 'manager')
+            ->lockForUpdate()
+            ->first(['is_active']);
+
+        return $membership !== null && (bool) $membership->is_active;
+    }
+
+    /**
+     * @param  list<int|string>  $destinationCompanyIds
+     * @param  EloquentCollection<int, Sale>  $existingSales
+     * @return list<int>
+     */
+    private function lockImportReferences(DataImport $batch, User $actor, array $destinationCompanyIds, EloquentCollection $existingSales): array
+    {
+        $sourceCompanyIds = $existingSales->pluck('company_id')
+            ->map(static fn (int|string $id): int => (int) $id)
+            ->all();
+        $companyIds = array_values(array_unique(array_map(
+            static fn (int|string $id): int => (int) $id,
+            [...$destinationCompanyIds, ...$sourceCompanyIds],
+        )));
+        sort($companyIds, SORT_NUMERIC);
+
+        $companies = $companyIds === []
+            ? new EloquentCollection
+            : Company::query()
+                ->where('organization_id', $batch->organization_id)
+                ->whereIn('id', $companyIds)
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+        $teamIds = $companies->pluck('team_id')
+            ->filter()
+            ->map(static fn (int|string $id): int => (int) $id)
+            ->all();
+        if ($batch->team_id !== null) {
+            $teamIds[] = (int) $batch->team_id;
+        }
+        $teamIds = array_values(array_unique($teamIds));
+        sort($teamIds, SORT_NUMERIC);
+
+        if ($teamIds !== []) {
+            Team::query()
+                ->where('organization_id', $batch->organization_id)
+                ->whereIn('id', $teamIds)
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get(['id', 'status']);
+        }
+
+        $sourceTeamIds = $companies->whereIn('id', $sourceCompanyIds)
+            ->pluck('team_id')
+            ->filter()
+            ->map(static fn (int|string $id): int => (int) $id)
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+
+        if ($sourceTeamIds !== [] && $actor->roleIn($batch->organization_id) === 'manager') {
+            DB::table('team_memberships')
+                ->where('organization_id', $batch->organization_id)
+                ->whereIn('team_id', $sourceTeamIds)
+                ->where('user_id', $actor->id)
+                ->where('role', 'manager')
+                ->orderBy('team_id')
+                ->lockForUpdate()
+                ->get(['team_id', 'is_active']);
+        }
+
+        return array_values(array_map(static fn (int|string $id): int => (int) $id, $companies->modelKeys()));
     }
 
     private function hasActiveTeamMembership(DataImport $batch, User $actor, string $role, bool $lockDestination): bool
@@ -799,11 +1090,13 @@ class SaleImportService
         return $value;
     }
 
-    /** @param list<array{line: int, type: string, message: string}> $errors */
-    private function appendError(array &$errors, int $line, string $type, string $message): void
+    /** @param list<array{line: int, type: string, message: string, candidates?: list<array{id: int, name: string, detail?: string}>, can_create?: bool, can_update?: bool, duplicate_source?: 'file'|'database'}> $errors
+     * @param  array{candidates?: list<array{id: int, name: string, detail?: string}>, can_create?: bool, can_update?: bool, duplicate_source?: 'file'|'database'}  $extra
+     */
+    private function appendError(array &$errors, int $line, string $type, string $message, array $extra = []): void
     {
         if (count($errors) < 100) {
-            $errors[] = ['line' => $line, 'type' => $type, 'message' => $message];
+            $errors[] = ['line' => $line, 'type' => $type, 'message' => $message, ...$extra];
         }
     }
 }

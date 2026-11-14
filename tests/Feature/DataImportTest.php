@@ -2,10 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Domain\Commercial\CommercialInactivityService;
 use App\Domain\Commercial\CustomerScoreService;
 use App\Domain\Imports\CompanyImportService;
 use App\Domain\Imports\ContactImportService;
 use App\Domain\Imports\DataImportProcessor;
+use App\Domain\Imports\SaleImportService;
 use App\Domain\Imports\SpreadsheetPreviewReader;
 use App\Domain\Journeys\JourneyService;
 use App\Domain\Tenancy\TenantContext;
@@ -15,6 +17,7 @@ use App\Models\Contact;
 use App\Models\DataImport;
 use App\Models\JourneyTemplate;
 use App\Models\Organization;
+use App\Models\Sale;
 use App\Models\Team;
 use App\Models\User;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -2974,6 +2977,476 @@ class DataImportTest extends TestCase
                 ->component('imports/show')
                 ->where('fileError', 'Não foi possível ler o arquivo. Verifique se ele é um CSV ou XLSX válido.')
                 ->where('preview', null));
+    }
+
+    public function test_sale_import_can_explicitly_update_a_visible_duplicate_by_external_id(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $seller = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        $organization->users()->attach($seller, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->ownedBy($seller)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Escritório Histórico',
+            'tax_id' => '12345678000195',
+            'relationship_status' => 'customer',
+        ]);
+        $sale = Sale::factory()->create([
+            'organization_id' => $organization->id,
+            'company_id' => $company->id,
+            'seller_id' => $seller->id,
+            'created_by' => $owner->id,
+            'external_id' => 'erp-sale-0042',
+            'description' => 'Venda antiga',
+            'amount' => '100.00',
+            'sold_at' => '2026-10-31 12:00:00',
+            'status' => 'confirmed',
+        ]);
+        $session = ['active_organization_id' => $organization->id];
+        $csv = "external_id,company_tax_id,seller_email,description,amount,currency,sold_at,status,notes\n"
+            .'erp-sale-0042,12345678000195,'.$seller->email.',Venda corrigida,250.50,BRL,2026-11-01,cancelled,Cancelada no ERP'."\n";
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'sales',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('sales.csv', $csv),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $mapping = [
+            'external_id' => '0', 'company_tax_id' => '1', 'seller_email' => '2',
+            'description' => '3', 'amount' => '4', 'currency' => '5',
+            'sold_at' => '6', 'status' => '7', 'notes' => '8',
+        ];
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', ['mapping' => $mapping])
+            ->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+
+        $batch = DataImport::query()->findOrFail($importId);
+        $this->assertSame(1, $batch->duplicate_rows);
+        $this->assertSame('duplicate', $batch->validation_errors[0]['type']);
+        $this->assertSame([$sale->id], array_column($batch->validation_errors[0]['candidates'] ?? [], 'id'), json_encode($batch->validation_errors));
+        $this->actingAs($owner)->withSession($session)->get('/imports/'.$importId)
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('import.validation_errors.0.candidates.0.id', $sale->id)
+                ->where('import.validation_errors.0.candidates.0.name', $company->name)
+                ->where('import.validation_errors.0.candidates.0.detail', 'Venda antiga · R$ 100,00 · 2026-10-31 · confirmada')
+                ->missing('import.validation_errors.0.candidates.0.external_id'));
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/resolutions', [
+            'resolutions' => ['2' => ['action' => 'update']],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+
+        $batch = DataImport::query()->findOrFail($importId);
+        $this->assertSame(1, $batch->valid_rows);
+        $this->assertSame(0, $batch->duplicate_rows);
+        $this->assertSame(['action' => 'update', 'target_id' => $sale->id], $batch->duplicate_resolutions['2']);
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+            ->assertRedirect('/imports/'.$importId);
+
+        $sale->refresh();
+        $this->assertDatabaseCount('sales', 1);
+        $this->assertSame('Venda corrigida', $sale->description);
+        $this->assertSame('250.50', $sale->amount);
+        $this->assertSame('cancelled', $sale->status);
+        $this->assertSame('Cancelada no ERP', $sale->notes);
+        $this->assertNotNull($sale->cancelled_at);
+        $this->assertSame($owner->id, $sale->cancelled_by);
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $importId,
+            'status' => 'completed',
+            'created_rows' => 0,
+            'updated_rows' => 1,
+            'duplicate_rows' => 0,
+        ]);
+    }
+
+    public function test_salesperson_can_update_their_own_confirmed_sale_by_external_id(): void
+    {
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->ownedBy($salesperson)->create([
+            'organization_id' => $organization->id,
+            'tax_id' => '12345678000195',
+            'relationship_status' => 'customer',
+        ]);
+        $sale = Sale::factory()->create([
+            'organization_id' => $organization->id,
+            'company_id' => $company->id,
+            'seller_id' => $salesperson->id,
+            'created_by' => $salesperson->id,
+            'external_id' => 'salesperson-owned-sale',
+            'description' => 'Descrição antiga',
+            'status' => 'confirmed',
+        ]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $salesperson->id,
+            'record_type' => 'sales',
+            'status' => 'mapped',
+            'mapping' => [
+                'external_id' => 0, 'company_tax_id' => 1, 'seller_email' => 2,
+                'description' => 3, 'amount' => 4, 'currency' => 5,
+                'sold_at' => 6, 'status' => 7, 'notes' => 8,
+            ],
+        ]);
+        $rows = [[
+            'salesperson-owned-sale', '12345678000195', $salesperson->email,
+            'Descrição atualizada', '250.00', 'BRL', '2026-11-01', 'confirmed', '',
+        ]];
+
+        $service = app(SaleImportService::class);
+        $analysis = $service->analyze($batch, $salesperson, $rows, 1);
+
+        $this->assertTrue($analysis['errors'][0]['can_update']);
+
+        $batch->update(['duplicate_resolutions' => [
+            '2' => ['action' => 'update', 'target_id' => $sale->id],
+        ]]);
+        $analysis = $service->analyze($batch->refresh(), $salesperson, $rows, 1);
+        $result = $service->import(
+            $batch,
+            $salesperson,
+            $analysis['validRows'],
+            app(CustomerScoreService::class),
+            app(CommercialInactivityService::class),
+            app(JourneyService::class),
+        );
+
+        $this->assertSame(1, $result['updatedRows']);
+        $this->assertDatabaseHas('sales', [
+            'id' => $sale->id,
+            'description' => 'Descrição atualizada',
+            'created_by' => $salesperson->id,
+        ]);
+    }
+
+    public function test_sale_import_only_allows_one_update_for_repeated_file_identifiers(): void
+    {
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $seller = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        $organization->users()->attach($seller, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->ownedBy($seller)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Carteira Vendas Duplicadas',
+            'tax_id' => '12345678000195',
+        ]);
+        $sale = Sale::factory()->create([
+            'organization_id' => $organization->id,
+            'company_id' => $company->id,
+            'seller_id' => $seller->id,
+            'created_by' => $owner->id,
+            'external_id' => 'erp-sale-repeated',
+            'sold_at' => '2026-10-31 12:00:00',
+        ]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $owner->id,
+            'record_type' => 'sales',
+            'status' => 'mapped',
+            'mapping' => [
+                'external_id' => 0, 'company_tax_id' => 1, 'seller_email' => 2,
+                'description' => 3, 'amount' => 4, 'currency' => 5,
+                'sold_at' => 6, 'status' => 7, 'notes' => 8,
+            ],
+        ]);
+        $rows = [
+            ['erp-sale-repeated', '12345678000195', $seller->email, 'Primeira versão', '200.00', 'BRL', '2026-11-01', 'confirmed', ''],
+            ['erp-sale-repeated', '12345678000195', $seller->email, 'Segunda versão', '300.00', 'BRL', '2026-11-02', 'confirmed', ''],
+        ];
+
+        $analysis = app(SaleImportService::class)->analyze($batch, $owner, $rows, 2);
+
+        $this->assertSame(2, $analysis['duplicateRows']);
+        $this->assertCount(2, $analysis['errors']);
+        $this->assertTrue($analysis['errors'][0]['can_update']);
+        $this->assertFalse($analysis['errors'][1]['can_update']);
+        $batch->update([
+            'status' => 'validated',
+            'duplicate_rows' => 2,
+            'validation_errors' => $analysis['errors'],
+        ]);
+
+        $session = ['active_organization_id' => $organization->id];
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$batch->id.'/resolutions', [
+            'resolutions' => [
+                '2' => ['action' => 'update'],
+                '3' => ['action' => 'update'],
+            ],
+        ])->assertSessionHasErrors('resolutions');
+
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$batch->id.'/resolutions', [
+            'resolutions' => [
+                '2' => ['action' => 'update'],
+                '3' => ['action' => 'ignore'],
+            ],
+        ])->assertRedirect('/imports/'.$batch->id);
+
+        $batch->refresh();
+        $analysis = app(SaleImportService::class)->analyze($batch, $owner, $rows, 2);
+
+        $this->assertSame(1, $analysis['duplicateRows']);
+        $this->assertCount(1, $analysis['validRows']);
+        $this->assertSame(2, $analysis['validRows'][0]['line']);
+        $this->assertSame(['action' => 'update', 'target_id' => $sale->id], $analysis['validRows'][0]['resolution']);
+        $this->assertDatabaseCount('sales', 1);
+    }
+
+    public function test_salesperson_cannot_resolve_a_duplicate_sale_outside_their_scope(): void
+    {
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $otherSeller = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        $organization->users()->attach($otherSeller, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $visibleCompany = Company::factory()->ownedBy($salesperson)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Minha carteira de venda',
+            'tax_id' => '12345678000195',
+        ]);
+        $hiddenCompany = Company::factory()->ownedBy($otherSeller)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Carteira de outra pessoa',
+            'tax_id' => '98765432000110',
+        ]);
+        $hiddenSale = Sale::factory()->create([
+            'organization_id' => $organization->id,
+            'company_id' => $hiddenCompany->id,
+            'seller_id' => $otherSeller->id,
+            'created_by' => $otherSeller->id,
+            'external_id' => 'private-sale-key',
+            'description' => 'Venda confidencial',
+        ]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $salesperson->id,
+            'record_type' => 'sales',
+            'status' => 'mapped',
+            'mapping' => [
+                'external_id' => 0, 'company_tax_id' => 1, 'seller_email' => 2,
+                'description' => 3, 'amount' => 4, 'currency' => 5,
+                'sold_at' => 6, 'status' => 7, 'notes' => 8,
+            ],
+        ]);
+        $rows = [[
+            'private-sale-key', '12345678000195', $salesperson->email,
+            'Outra venda', '200.00', 'BRL', '2026-11-01', 'confirmed', '',
+        ]];
+
+        $analysis = app(SaleImportService::class)->analyze($batch, $salesperson, $rows, 1);
+
+        $this->assertSame(0, $analysis['duplicateRows']);
+        $this->assertSame(1, $analysis['invalidRows']);
+        $this->assertSame('A linha não pode ser importada no escopo de acesso atual.', $analysis['errors'][0]['message']);
+        $this->assertArrayNotHasKey('candidates', $analysis['errors'][0]);
+        $this->assertStringNotContainsString('private-sale-key', json_encode($analysis['errors']));
+        $this->assertStringNotContainsString('Venda confidencial', json_encode($analysis['errors']));
+        $this->assertSame($visibleCompany->id, Company::query()->where('tax_id', '12345678000195')->value('id'));
+        $this->assertDatabaseHas('sales', ['id' => $hiddenSale->id, 'description' => 'Venda confidencial']);
+    }
+
+    public function test_sales_import_counts_repeated_file_ids_without_revealing_a_hidden_sale(): void
+    {
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $otherSeller = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        $organization->users()->attach($otherSeller, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        Company::factory()->ownedBy($salesperson)->create([
+            'organization_id' => $organization->id,
+            'tax_id' => '12345678000195',
+        ]);
+        $hiddenCompany = Company::factory()->ownedBy($otherSeller)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa privada da outra carteira',
+            'tax_id' => '98765432000110',
+        ]);
+        Sale::factory()->create([
+            'organization_id' => $organization->id,
+            'company_id' => $hiddenCompany->id,
+            'seller_id' => $otherSeller->id,
+            'created_by' => $otherSeller->id,
+            'external_id' => 'hidden-repeated-sale-key',
+            'description' => 'Venda privada da outra carteira',
+        ]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $salesperson->id,
+            'record_type' => 'sales',
+            'status' => 'mapped',
+            'mapping' => [
+                'external_id' => 0, 'company_tax_id' => 1, 'seller_email' => 2,
+                'description' => 3, 'amount' => 4, 'currency' => 5,
+                'sold_at' => 6, 'status' => 7, 'notes' => 8,
+            ],
+        ]);
+        $rows = [
+            ['hidden-repeated-sale-key', '12345678000195', $salesperson->email, 'Primeira linha', '200.00', 'BRL', '2026-11-01', 'confirmed', ''],
+            ['hidden-repeated-sale-key', '12345678000195', $salesperson->email, 'Linha repetida', '300.00', 'BRL', '2026-11-02', 'confirmed', ''],
+        ];
+
+        $analysis = app(SaleImportService::class)->analyze($batch, $salesperson, $rows, 2);
+
+        $this->assertSame(1, $analysis['invalidRows']);
+        $this->assertSame(1, $analysis['duplicateRows']);
+        $this->assertSame('invalid', $analysis['errors'][0]['type']);
+        $this->assertSame('duplicate', $analysis['errors'][1]['type']);
+        $this->assertSame('file', $analysis['errors'][1]['duplicate_source']);
+        $this->assertArrayNotHasKey('candidates', $analysis['errors'][1]);
+        $serializedErrors = json_encode($analysis['errors']);
+        $this->assertStringNotContainsString('Empresa privada da outra carteira', $serializedErrors);
+        $this->assertStringNotContainsString('Venda privada da outra carteira', $serializedErrors);
+    }
+
+    public function test_sale_import_respects_update_policy_when_duplicate_is_visible_but_not_editable(): void
+    {
+        $organization = Organization::factory()->create();
+        $salesperson = User::factory()->create();
+        $otherSeller = User::factory()->create();
+        $organization->users()->attach($salesperson, ['role' => 'salesperson']);
+        $organization->users()->attach($otherSeller, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $visibleCompany = Company::factory()->ownedBy($salesperson)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Carteira acessível',
+            'tax_id' => '12345678000195',
+        ]);
+        $hiddenCompany = Company::factory()->ownedBy($otherSeller)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa transferida',
+            'tax_id' => '98765432000110',
+        ]);
+        $saleInVisibleCompany = Sale::factory()->create([
+            'organization_id' => $organization->id,
+            'company_id' => $visibleCompany->id,
+            'seller_id' => $otherSeller->id,
+            'created_by' => $otherSeller->id,
+            'external_id' => 'visible-but-not-editable',
+            'description' => 'Venda de outra pessoa',
+        ]);
+        $saleInTransferredCompany = Sale::factory()->create([
+            'organization_id' => $organization->id,
+            'company_id' => $hiddenCompany->id,
+            'seller_id' => $salesperson->id,
+            'created_by' => $salesperson->id,
+            'external_id' => 'sale-after-transfer',
+            'description' => 'Venda própria transferida',
+        ]);
+        $batch = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $salesperson->id,
+            'record_type' => 'sales',
+            'status' => 'mapped',
+            'mapping' => [
+                'external_id' => 0, 'company_tax_id' => 1, 'seller_email' => 2,
+                'description' => 3, 'amount' => 4, 'currency' => 5,
+                'sold_at' => 6, 'status' => 7, 'notes' => 8,
+            ],
+        ]);
+        $rows = [
+            ['visible-but-not-editable', '12345678000195', $salesperson->email, 'Tentar editar', '250.00', 'BRL', '2026-11-01', 'confirmed', ''],
+            ['sale-after-transfer', '12345678000195', $salesperson->email, 'Tentar reassociar', '350.00', 'BRL', '2026-11-01', 'confirmed', ''],
+        ];
+
+        $analysis = app(SaleImportService::class)->analyze($batch, $salesperson, $rows, 2);
+
+        $this->assertSame(2, $analysis['duplicateRows']);
+        $this->assertCount(2, $analysis['errors']);
+        $this->assertFalse($analysis['errors'][0]['can_update']);
+        $this->assertFalse($analysis['errors'][1]['can_update']);
+        $this->assertSame([$saleInVisibleCompany->id], array_column($analysis['errors'][0]['candidates'], 'id'));
+        $this->assertSame([$saleInTransferredCompany->id], array_column($analysis['errors'][1]['candidates'], 'id'));
+        $batch->update([
+            'status' => 'validated',
+            'duplicate_rows' => 2,
+            'validation_errors' => $analysis['errors'],
+        ]);
+
+        $this->actingAs($salesperson)->withSession(['active_organization_id' => $organization->id])
+            ->post('/imports/'.$batch->id.'/resolutions', [
+                'resolutions' => [
+                    '2' => ['action' => 'update'],
+                    '3' => ['action' => 'update'],
+                ],
+            ])
+            ->assertSessionHasErrors('resolutions');
+
+        $this->assertDatabaseHas('sales', ['id' => $saleInVisibleCompany->id, 'description' => 'Venda de outra pessoa']);
+        $this->assertDatabaseHas('sales', ['id' => $saleInTransferredCompany->id, 'description' => 'Venda própria transferida']);
+    }
+
+    public function test_sale_import_keeps_new_external_id_repeats_as_file_duplicates(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $owner = User::factory()->create();
+        $seller = User::factory()->create();
+        $organization->users()->attach($owner, ['role' => 'owner']);
+        $organization->users()->attach($seller, ['role' => 'salesperson']);
+        app(TenantContext::class)->set($organization);
+        $company = Company::factory()->ownedBy($seller)->create([
+            'organization_id' => $organization->id,
+            'name' => 'Empresa de arquivo',
+            'tax_id' => '12345678000195',
+        ]);
+        $csv = "external_id,company_tax_id,seller_email,description,amount,currency,sold_at,status,notes\n"
+            .'new-external-id,12345678000195,'.$seller->email.',Primeira,100.00,BRL,2026-11-01,confirmed,'."\n"
+            .'new-external-id,12345678000195,'.$seller->email.',Repetida,200.00,BRL,2026-11-02,confirmed,'."\n";
+        $session = ['active_organization_id' => $organization->id];
+
+        $this->actingAs($owner)->withSession($session)->post('/imports', [
+            'record_type' => 'sales',
+            'journey_mode' => 'none',
+            'file' => UploadedFile::fake()->createWithContent('sales.csv', $csv),
+        ])->assertRedirect('/imports');
+
+        $importId = (int) DB::table('data_imports')->value('id');
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
+            'mapping' => [
+                'external_id' => '0', 'company_tax_id' => '1', 'seller_email' => '2',
+                'description' => '3', 'amount' => '4', 'currency' => '5',
+                'sold_at' => '6', 'status' => '7', 'notes' => '8',
+            ],
+        ])->assertRedirect('/imports/'.$importId);
+        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId);
+
+        $batch = DataImport::query()->findOrFail($importId);
+        $this->assertSame(1, $batch->valid_rows);
+        $this->assertSame(1, $batch->duplicate_rows);
+        $this->assertSame(0, $batch->invalid_rows);
+        $this->assertSame('file', $batch->validation_errors[0]['duplicate_source']);
+        $this->assertArrayNotHasKey('candidates', $batch->validation_errors[0]);
+        $this->actingAs($owner)->withSession($session)->get('/imports/'.$importId)
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('import.duplicate_rows', 1)
+                ->where('import.invalid_rows', 0)
+                ->where('import.validation_errors.0.type', 'duplicate')
+                ->where('import.validation_errors.0.duplicate_source', 'file'));
+        $this->actingAs($owner)->withSession($session)->get('/imports')
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('imports.data.0.duplicate_rows', 1)
+                ->where('imports.data.0.invalid_rows', 0));
     }
 
     private function xlsxUpload(): UploadedFile

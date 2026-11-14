@@ -7,6 +7,7 @@ use App\Models\Company;
 use App\Models\Contact;
 use App\Models\DataImport;
 use App\Models\Organization;
+use App\Models\Sale;
 use App\Models\User;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Str;
@@ -207,4 +208,88 @@ it('updates a staged visible contact duplicate and links its grouped rows throug
         'contact_id' => $contact->id,
         'notes' => 'Escritório dois',
     ]);
+});
+
+it('updates a staged visible sale duplicate through Redis without creating another sale', function (): void {
+    $organization = Organization::factory()->create();
+    $owner = User::factory()->create();
+    $seller = User::factory()->create();
+    $organization->users()->attach($owner, ['role' => 'owner']);
+    $organization->users()->attach($seller, ['role' => 'salesperson']);
+    app(TenantContext::class)->set($organization);
+    $company = Company::factory()->ownedBy($seller)->create([
+        'organization_id' => $organization->id,
+        'name' => 'Empresa da venda pelo worker',
+        'relationship_status' => 'customer',
+    ]);
+    $sale = Sale::factory()->create([
+        'organization_id' => $organization->id,
+        'company_id' => $company->id,
+        'seller_id' => $seller->id,
+        'created_by' => $owner->id,
+        'external_id' => 'redis-sale-duplicate',
+        'description' => 'Venda antes do worker',
+        'amount' => '100.00',
+        'status' => 'confirmed',
+    ]);
+    $batch = DataImport::factory()->create([
+        'organization_id' => $organization->id,
+        'created_by' => $owner->id,
+        'record_type' => 'sales',
+        'status' => 'queued',
+        'total_rows' => 1,
+        'valid_rows' => 1,
+        'processing_attempts' => 1,
+    ]);
+    app(DataImportProcessor::class)->stageRows($batch, [[
+        'line' => 2,
+        'external_id' => 'redis-sale-duplicate',
+        'company_id' => $company->id,
+        'seller_id' => $seller->id,
+        'description' => 'Venda revisada pelo worker',
+        'amount' => '275.50',
+        'currency' => 'BRL',
+        'sold_at' => '2026-11-01 12:00:00',
+        'status' => 'confirmed',
+        'notes' => 'Atualizada via fila',
+        'resolution' => ['action' => 'update', 'target_id' => $sale->id],
+    ]]);
+    $queue = 'data-import-'.Str::uuid();
+
+    ProcessDataImportChunk::dispatch($organization->id, $batch->id, 1)->onQueue($queue);
+
+    $exitCode = Artisan::call('queue:work', [
+        'connection' => 'redis',
+        '--once' => true,
+        '--queue' => $queue,
+        '--sleep' => 0,
+        '--tries' => 1,
+    ]);
+
+    expect($exitCode)->toBe(0, Artisan::output())
+        ->and($batch->refresh()->status)->toBe('completed')
+        ->and($batch->processed_rows)->toBe(1)
+        ->and($batch->created_rows)->toBe(0)
+        ->and($batch->updated_rows)->toBe(1)
+        ->and($batch->duplicate_rows)->toBe(0);
+
+    $sale->refresh();
+    $this->assertDatabaseCount('sales', 1);
+    $this->assertSame('Venda revisada pelo worker', $sale->description);
+    $this->assertSame('275.50', $sale->amount);
+    $this->assertSame($owner->id, $sale->created_by);
+
+    ProcessDataImportChunk::dispatch($organization->id, $batch->id, 1)->onQueue($queue);
+    Artisan::call('queue:work', [
+        'connection' => 'redis',
+        '--once' => true,
+        '--queue' => $queue,
+        '--sleep' => 0,
+        '--tries' => 1,
+    ]);
+
+    expect($batch->refresh()->created_rows)->toBe(0)
+        ->and($batch->updated_rows)->toBe(1)
+        ->and($batch->processed_rows)->toBe(1);
+    $this->assertDatabaseCount('sales', 1);
 });
