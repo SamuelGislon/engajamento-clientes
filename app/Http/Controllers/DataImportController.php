@@ -20,6 +20,7 @@ use App\Http\Requests\SaveDataImportMappingRequest;
 use App\Http\Requests\SaveDataImportResolutionsRequest;
 use App\Http\Requests\StoreDataImportRequest;
 use App\Jobs\ProcessDataImportChunk;
+use App\Jobs\ValidateDataImport;
 use App\Models\Company;
 use App\Models\Contact;
 use App\Models\DataImport;
@@ -159,13 +160,13 @@ class DataImportController extends Controller
         $preview = null;
         $fileError = null;
 
-        if (! in_array($record->status, ['queued', 'processing', 'failed', 'expired'], true)) {
+        if (! in_array($record->status, ['queued', 'processing', 'failed', 'validation_queued', 'validating', 'expired'], true)) {
             if ($record->disk !== 'local' || ! Str::startsWith($record->file_path, $expectedPathPrefix)) {
                 abort(404);
             }
 
             try {
-                $preview = $this->previewRecord($record, $previewReader);
+                $preview = $this->previewRecord($record, $previewReader, 10, 11);
             } catch (ImportFileException $exception) {
                 $fileError = $exception->getMessage();
             }
@@ -215,13 +216,13 @@ class DataImportController extends Controller
     ): RedirectResponse {
         $record = DataImport::query()->findOrFail($dataImport);
         Gate::authorize('update', $record);
-        if (in_array($record->status, ['completed', 'expired', 'queued', 'processing'], true)) {
+        if (in_array($record->status, ['completed', 'expired', 'queued', 'processing', 'validation_queued', 'validating'], true)) {
             throw ValidationException::withMessages(['mapping' => 'Este lote não pode mais ser alterado.']);
         }
 
         $this->preventResettingPartialImport($record, 'mapping');
 
-        $preview = $this->previewRecord($record, $previewReader);
+        $preview = $this->previewRecord($record, $previewReader, 10, 11);
         $validated = $request->validated();
         $mapping = array_filter(
             $validated['mapping'],
@@ -289,7 +290,7 @@ class DataImportController extends Controller
             $lockedRecord = DataImport::query()->lockForUpdate()->findOrFail($dataImport);
             Gate::forUser($request->user())->authorize('update', $lockedRecord);
 
-            if (in_array($lockedRecord->status, ['completed', 'expired', 'queued', 'processing'], true)) {
+            if (in_array($lockedRecord->status, ['completed', 'expired', 'queued', 'processing', 'validation_queued', 'validating'], true)) {
                 throw ValidationException::withMessages(['mapping' => 'Este lote já foi confirmado e não pode mais ser alterado.']);
             }
 
@@ -404,16 +405,62 @@ class DataImportController extends Controller
             throw ValidationException::withMessages(['mapping' => 'Salve o mapeamento antes de validar as linhas.']);
         }
 
-        if (in_array($record->status, ['completed', 'expired', 'queued', 'processing'], true)) {
+        if (in_array($record->status, ['completed', 'expired', 'queued', 'processing', 'validation_queued', 'validating'], true)) {
             throw ValidationException::withMessages(['file' => 'Este lote não pode mais ser validado.']);
         }
 
         $this->preventResettingPartialImport($record, 'file');
 
         try {
-            $preview = $this->previewRecord($record, $previewReader, SpreadsheetPreviewReader::MAX_ROWS);
+            $preview = $this->previewRecord(
+                $record,
+                $previewReader,
+                DataImportProcessor::ASYNC_ROW_THRESHOLD + 1,
+                DataImportProcessor::ASYNC_ROW_THRESHOLD + 1,
+            );
         } catch (ImportFileException $exception) {
             throw ValidationException::withMessages(['file' => $exception->getMessage()]);
+        }
+
+        if (! $preview['complete'] || $preview['totalRows'] > DataImportProcessor::ASYNC_ROW_THRESHOLD) {
+            if (config('queue.default') === 'sync') {
+                throw ValidationException::withMessages([
+                    'file' => 'Este arquivo exige validação em fila. Configure Redis e um worker antes de validar arquivos com mais de 250 linhas.',
+                ]);
+            }
+
+            DB::transaction(function () use ($request, $record): void {
+                $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
+                Gate::forUser($request->user())->authorize('update', $batch);
+
+                if (in_array($batch->status, ['completed', 'expired', 'queued', 'processing', 'validation_queued', 'validating'], true)) {
+                    throw ValidationException::withMessages(['file' => 'Este lote não pode mais ser validado.']);
+                }
+
+                if ($batch->mapping === null || $batch->mapping === []) {
+                    throw ValidationException::withMessages(['mapping' => 'Salve o mapeamento antes de validar as linhas.']);
+                }
+
+                $this->preventResettingPartialImport($batch, 'file');
+
+                $attemptNumber = $batch->processing_attempts + 1;
+                $batch->update([
+                    'status' => 'validation_queued',
+                    'total_rows' => 0,
+                    'processed_rows' => 0,
+                    'processing_attempts' => $attemptNumber,
+                    'queue_dispatches' => 1,
+                    'last_processed_line' => null,
+                    'last_error' => null,
+                    'processing_started_at' => null,
+                    'processing_heartbeat_at' => null,
+                    'failed_at' => null,
+                ]);
+
+                ValidateDataImport::dispatch($batch->organization_id, $batch->id, $attemptNumber)->afterCommit();
+            });
+
+            return redirect()->route('imports.show', $record->id)->with('success', 'Validação enviada à fila. Você pode acompanhar o progresso nesta página.');
         }
 
         $importService = match ($record->record_type) {
@@ -438,7 +485,7 @@ class DataImportController extends Controller
             $batch = DataImport::query()->lockForUpdate()->findOrFail($record->id);
             Gate::forUser($request->user())->authorize('update', $batch);
 
-            if (in_array($batch->status, ['completed', 'expired', 'queued', 'processing'], true)) {
+            if (in_array($batch->status, ['completed', 'expired', 'queued', 'processing', 'validation_queued', 'validating'], true)) {
                 throw ValidationException::withMessages(['file' => 'Este lote não pode mais ser validado.']);
             }
 
@@ -718,9 +765,13 @@ class DataImportController extends Controller
         return redirect()->route('imports.show', $record->id)->with('success', 'Importação retomada. O processamento continuará a partir das linhas pendentes.');
     }
 
-    /** @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int, malformedRows: list<int>} */
-    private function previewRecord(DataImport $record, SpreadsheetPreviewReader $previewReader, int $sampleLimit = 10): array
-    {
+    /** @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int, malformedRows: list<int>, complete: bool} */
+    private function previewRecord(
+        DataImport $record,
+        SpreadsheetPreviewReader $previewReader,
+        int $sampleLimit = 10,
+        ?int $stopAfterRows = null,
+    ): array {
         if ($record->expires_at->isPast()) {
             throw new ImportFileException('O arquivo temporário expirou e não pode mais ser pré-visualizado.');
         }
@@ -741,6 +792,7 @@ class DataImportController extends Controller
             Storage::disk('local')->path($record->file_path),
             $format,
             $sampleLimit,
+            $stopAfterRows,
         );
     }
 

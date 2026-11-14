@@ -3,6 +3,7 @@
 use App\Domain\Imports\DataImportProcessor;
 use App\Domain\Tenancy\TenantContext;
 use App\Jobs\ProcessDataImportChunk;
+use App\Jobs\ValidateDataImport;
 use App\Models\Company;
 use App\Models\Contact;
 use App\Models\DataImport;
@@ -10,12 +11,65 @@ use App\Models\Organization;
 use App\Models\Sale;
 use App\Models\User;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 beforeEach(function (): void {
     if (config('database.default') !== 'pgsql' || config('queue.default') !== 'redis') {
         $this->markTestSkipped('Redis import processing is verified against PostgreSQL and Redis.');
     }
+});
+
+it('validates and stages a large private import through a Redis worker', function (): void {
+    Storage::fake('local');
+
+    $organization = Organization::factory()->create();
+    $owner = User::factory()->create();
+    $organization->users()->attach($owner, ['role' => 'owner']);
+    app(TenantContext::class)->set($organization);
+    $path = 'imports/'.$organization->id.'/redis-validation.csv';
+    Storage::disk('local')->put($path, "Name\n".implode("\n", array_map(
+        static fn (int $number): string => 'Empresa validada Redis '.$number,
+        range(1, 251),
+    )));
+    $batch = DataImport::factory()->create([
+        'organization_id' => $organization->id,
+        'created_by' => $owner->id,
+        'status' => 'validation_queued',
+        'mapping' => ['name' => 0],
+        'file_path' => $path,
+        'processing_attempts' => 1,
+    ]);
+    $queue = 'data-import-validation-'.Str::uuid();
+
+    ValidateDataImport::dispatch($organization->id, $batch->id, 1)->onQueue($queue);
+
+    $exitCode = Artisan::call('queue:work', [
+        'connection' => 'redis',
+        '--once' => true,
+        '--queue' => $queue,
+        '--sleep' => 0,
+        '--tries' => 1,
+    ]);
+
+    expect($exitCode)->toBe(0, Artisan::output())
+        ->and($batch->refresh()->status)->toBe('validated')
+        ->and($batch->total_rows)->toBe(251)
+        ->and($batch->valid_rows)->toBe(251)
+        ->and(DB::table('data_import_rows')->where('data_import_id', $batch->id)->count())->toBe(251);
+
+    ValidateDataImport::dispatch($organization->id, $batch->id, 1)->onQueue($queue);
+    Artisan::call('queue:work', [
+        'connection' => 'redis',
+        '--once' => true,
+        '--queue' => $queue,
+        '--sleep' => 0,
+        '--tries' => 1,
+    ]);
+
+    expect($batch->refresh()->status)->toBe('validated')
+        ->and(DB::table('data_import_rows')->where('data_import_id', $batch->id)->count())->toBe(251);
 });
 
 it('processes a staged company import through a Redis worker', function (): void {

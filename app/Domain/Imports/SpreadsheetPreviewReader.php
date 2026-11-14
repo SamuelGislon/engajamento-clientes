@@ -2,6 +2,7 @@
 
 namespace App\Domain\Imports;
 
+use Closure;
 use DateInterval;
 use DateTimeInterface;
 use OpenSpout\Reader\CSV\Options as CsvOptions;
@@ -16,10 +17,16 @@ class SpreadsheetPreviewReader
     public const MAX_COLUMNS = 100;
 
     /**
-     * @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int, malformedRows: list<int>}
+     * @param  null|Closure(int): void  $onRowRead
+     * @return array{sheetName: string, headers: list<string>, rows: list<list<string>>, totalRows: int, malformedRows: list<int>, complete: bool}
      */
-    public function preview(string $path, string $format, int $sampleLimit = 10): array
-    {
+    public function preview(
+        string $path,
+        string $format,
+        int $sampleLimit = 10,
+        ?int $stopAfterRows = null,
+        ?Closure $onRowRead = null,
+    ): array {
         $reader = match (strtolower($format)) {
             'csv' => $this->csvReader($path),
             'xlsx' => new XlsxReader,
@@ -37,6 +44,7 @@ class SpreadsheetPreviewReader
                 $rows = [];
                 $malformedRows = [];
                 $totalRows = 0;
+                $complete = true;
 
                 foreach ($sheet->getRowIterator() as $row) {
                     $values = [];
@@ -76,6 +84,14 @@ class SpreadsheetPreviewReader
                     if (count($rows) < max(0, $sampleLimit)) {
                         $rows[] = $values;
                     }
+
+                    $onRowRead?->__invoke($totalRows);
+
+                    if ($stopAfterRows !== null && $totalRows >= $stopAfterRows) {
+                        $complete = false;
+
+                        break;
+                    }
                 }
 
                 if ($headers === null) {
@@ -88,6 +104,7 @@ class SpreadsheetPreviewReader
                     'rows' => $rows,
                     'totalRows' => $totalRows,
                     'malformedRows' => $malformedRows,
+                    'complete' => $complete,
                 ];
             }
 

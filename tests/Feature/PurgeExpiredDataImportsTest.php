@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Domain\Imports\DataImportProcessor;
 use App\Domain\Tenancy\TenantContext;
 use App\Jobs\ProcessDataImportChunk;
+use App\Jobs\ValidateDataImport;
 use App\Models\DataImport;
 use App\Models\Organization;
 use App\Models\User;
@@ -313,6 +314,91 @@ class PurgeExpiredDataImportsTest extends TestCase
             && $job->attemptNumber === 3);
         $this->assertSame(2, $dataImport->fresh()->queue_dispatches);
         $this->assertTrue($dataImport->fresh()->updated_at->isAfter(now()->subMinutes(1)));
+    }
+
+    public function test_stale_validation_queue_is_reenqueued_with_the_same_attempt(): void
+    {
+        Bus::fake();
+
+        $organization = Organization::factory()->create();
+        $creator = User::factory()->create();
+        $organization->users()->attach($creator, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $dataImport = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $creator->id,
+            'status' => 'validation_queued',
+            'processing_attempts' => 2,
+            'queue_dispatches' => 1,
+            'updated_at' => now()->subMinutes(11),
+            'expires_at' => now()->addDay(),
+        ]);
+
+        $this->artisan('data-imports:purge-expired')->assertSuccessful();
+
+        Bus::assertDispatched(ValidateDataImport::class, fn (ValidateDataImport $job): bool => $job->organizationId === $organization->id
+            && $job->dataImportId === $dataImport->id
+            && $job->attemptNumber === 2);
+        $this->assertSame('validation_queued', $dataImport->fresh()->status);
+        $this->assertSame(2, $dataImport->fresh()->queue_dispatches);
+    }
+
+    public function test_stale_validation_worker_becomes_retryable_without_removing_its_source_file(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $creator = User::factory()->create();
+        $organization->users()->attach($creator, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $path = 'imports/'.$organization->id.'/stale-validation.csv';
+        $dataImport = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $creator->id,
+            'file_path' => $path,
+            'status' => 'validating',
+            'processing_attempts' => 1,
+            'processing_started_at' => now()->subMinutes(20),
+            'processing_heartbeat_at' => now()->subMinutes(20),
+            'expires_at' => now()->addDay(),
+        ]);
+        Storage::disk('local')->put($path, 'private validation file');
+
+        $this->artisan('data-imports:purge-expired')->assertSuccessful();
+
+        $this->assertDatabaseHas('data_imports', [
+            'id' => $dataImport->id,
+            'status' => 'validation_failed',
+            'processing_attempts' => 1,
+        ]);
+        $this->assertNotNull($dataImport->fresh()->failed_at);
+        Storage::disk('local')->assertExists($path);
+    }
+
+    public function test_expired_validation_file_is_not_purged_while_a_worker_lease_is_active(): void
+    {
+        Storage::fake('local');
+
+        $organization = Organization::factory()->create();
+        $creator = User::factory()->create();
+        $organization->users()->attach($creator, ['role' => 'owner']);
+        app(TenantContext::class)->set($organization);
+        $path = 'imports/'.$organization->id.'/active-validation.csv';
+        $dataImport = DataImport::factory()->create([
+            'organization_id' => $organization->id,
+            'created_by' => $creator->id,
+            'file_path' => $path,
+            'status' => 'validating',
+            'processing_started_at' => now()->subMinutes(5),
+            'processing_heartbeat_at' => now()->subMinute(),
+            'expires_at' => now()->subMinute(),
+        ]);
+        Storage::disk('local')->put($path, 'private active validation file');
+
+        $this->artisan('data-imports:purge-expired')->assertSuccessful();
+
+        $this->assertSame('validating', $dataImport->fresh()->status);
+        Storage::disk('local')->assertExists($path);
     }
 
     public function test_stale_queue_redeliveries_are_bounded_and_leave_the_batch_resumable(): void

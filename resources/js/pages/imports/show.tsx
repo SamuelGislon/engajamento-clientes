@@ -25,6 +25,7 @@ type Preview = {
     rows: string[][];
     totalRows: number;
     malformedRows: number[];
+    complete: boolean;
 };
 
 type ImportRecord = {
@@ -163,9 +164,12 @@ export default function ImportShow({
         importRecord.validation_errors,
         resolutionForm.setData,
     ]);
-    const isQueueActive =
-        importRecord.status === 'queued' ||
-        importRecord.status === 'processing';
+    const isQueueActive = [
+        'validation_queued',
+        'validating',
+        'queued',
+        'processing',
+    ].includes(importRecord.status);
     const { start: startPolling, stop: stopPolling } = usePoll(
         2000,
         { only: ['import'] },
@@ -291,29 +295,51 @@ export default function ImportShow({
                     </div>
                 </header>
 
-                {['queued', 'processing', 'failed'].includes(
-                    importRecord.status,
-                ) && (
+                {[
+                    'validation_queued',
+                    'validating',
+                    'validation_failed',
+                    'queued',
+                    'processing',
+                    'failed',
+                ].includes(importRecord.status) && (
                     <section
                         aria-live="polite"
                         className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm shadow-black/[0.02] md:p-7"
                     >
                         <h2 className="font-semibold">
-                            {importRecord.status === 'queued'
-                                ? 'Importação na fila'
-                                : importRecord.status === 'processing'
-                                  ? 'Importação em andamento'
-                                  : 'Importação interrompida'}
+                            {importRecord.status === 'validation_queued'
+                                ? 'Validação na fila'
+                                : importRecord.status === 'validating'
+                                  ? 'Arquivo em validação'
+                                  : importRecord.status === 'validation_failed'
+                                    ? 'Validação interrompida'
+                                    : importRecord.status === 'queued'
+                                      ? 'Importação na fila'
+                                      : importRecord.status === 'processing'
+                                        ? 'Importação em andamento'
+                                        : 'Importação interrompida'}
                         </h2>
                         <p className="mt-1 text-sm text-muted-foreground">
-                            {importRecord.status === 'queued'
-                                ? 'O processamento começará assim que um worker estiver disponível.'
-                                : importRecord.status === 'processing'
-                                  ? 'Esta página atualiza o progresso automaticamente.'
-                                  : (importRecord.last_error ??
-                                    'O lote pode ser retomado a partir das linhas pendentes.')}
+                            {importRecord.status === 'validation_queued'
+                                ? 'A leitura e a validação completas começarão assim que um worker estiver disponível.'
+                                : importRecord.status === 'validating'
+                                  ? importRecord.processed_rows > 0
+                                      ? `${importRecord.processed_rows} linhas lidas. Verificando regras e duplicidades.`
+                                      : 'Esta página atualiza o progresso da leitura e validação automaticamente.'
+                                  : importRecord.status === 'validation_failed'
+                                    ? (importRecord.last_error ??
+                                      'Revise o mapeamento e tente validar o lote novamente.')
+                                    : importRecord.status === 'queued'
+                                      ? 'O processamento começará assim que um worker estiver disponível.'
+                                      : importRecord.status === 'processing'
+                                        ? 'Esta página atualiza o progresso automaticamente.'
+                                        : (importRecord.last_error ??
+                                          'O lote pode ser retomado a partir das linhas pendentes.')}
                         </p>
-                        {importRecord.status !== 'failed' && (
+                        {['queued', 'processing'].includes(
+                            importRecord.status,
+                        ) && (
                             <div className="mt-5 grid gap-2">
                                 <progress
                                     aria-label="Progresso da importação"
@@ -327,6 +353,19 @@ export default function ImportShow({
                                 <p className="text-sm text-muted-foreground">
                                     {importRecord.processed_rows} de{' '}
                                     {importRecord.total_rows} linhas processadas
+                                </p>
+                            </div>
+                        )}
+                        {importRecord.status === 'validating' && (
+                            <div className="mt-5 grid gap-2">
+                                <progress
+                                    aria-label="Progresso da validação"
+                                    className="h-3 w-full accent-primary"
+                                />
+                                <p className="text-sm text-muted-foreground">
+                                    {importRecord.processed_rows > 0
+                                        ? `${importRecord.processed_rows} linhas lidas; a validação das regras e duplicidades continua.`
+                                        : 'Preparando a leitura do arquivo.'}
                                 </p>
                             </div>
                         )}
@@ -350,6 +389,18 @@ export default function ImportShow({
                                 {actionForm.processing
                                     ? 'Retomando…'
                                     : 'Retomar linhas pendentes'}
+                            </Button>
+                        )}
+                        {importRecord.status === 'validation_failed' && (
+                            <Button
+                                type="button"
+                                onClick={validateRows}
+                                disabled={actionForm.processing}
+                                className="mt-4"
+                            >
+                                {actionForm.processing
+                                    ? 'Enviando…'
+                                    : 'Validar novamente'}
                             </Button>
                         )}
                     </section>
@@ -385,7 +436,11 @@ export default function ImportShow({
                         <section className="grid gap-4 sm:grid-cols-3">
                             <Summary
                                 label="Registros encontrados"
-                                value={preview.totalRows}
+                                value={
+                                    preview.complete
+                                        ? preview.totalRows
+                                        : `${preview.totalRows}+`
+                                }
                             />
                             <Summary
                                 label="Colunas"
@@ -402,9 +457,9 @@ export default function ImportShow({
                                 role="status"
                                 className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4 text-sm text-muted-foreground"
                             >
-                                {preview.malformedRows.length} linhas têm
-                                valores além das colunas do cabeçalho e serão
-                                rejeitadas. Primeiras linhas:{' '}
+                                {preview.malformedRows.length} linhas da prévia
+                                têm valores além das colunas do cabeçalho e
+                                serão rejeitadas. Primeiras linhas:{' '}
                                 {preview.malformedRows.slice(0, 5).join(', ')}
                                 {preview.malformedRows.length > 5 ? '…' : ''}.
                             </p>
@@ -423,7 +478,9 @@ export default function ImportShow({
                                 </div>
                                 <p className="text-xs text-muted-foreground">
                                     {preview.headers.length} colunas ·{' '}
-                                    {preview.totalRows} linhas não vazias
+                                    {preview.complete
+                                        ? `${preview.totalRows} linhas não vazias`
+                                        : `pelo menos ${preview.totalRows} linhas não vazias`}
                                 </p>
                             </div>
                             {preview.rows.length === 0 ? (
@@ -494,9 +551,13 @@ export default function ImportShow({
 
                 {!fileError &&
                     preview &&
-                    ['uploaded', 'previewed', 'mapped', 'validated'].includes(
-                        importRecord.status,
-                    ) && (
+                    [
+                        'uploaded',
+                        'previewed',
+                        'mapped',
+                        'validated',
+                        'validation_failed',
+                    ].includes(importRecord.status) && (
                         <form
                             onSubmit={saveMapping}
                             className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm shadow-black/[0.02] md:p-7"
@@ -1063,7 +1124,7 @@ export default function ImportShow({
     );
 }
 
-function Summary({ label, value }: { label: string; value: number }) {
+function Summary({ label, value }: { label: string; value: number | string }) {
     return (
         <div className="rounded-2xl border border-border/70 bg-card p-5 shadow-sm shadow-black/[0.02]">
             <p className="text-sm text-muted-foreground">{label}</p>

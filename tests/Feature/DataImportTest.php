@@ -12,6 +12,7 @@ use App\Domain\Imports\SpreadsheetPreviewReader;
 use App\Domain\Journeys\JourneyService;
 use App\Domain\Tenancy\TenantContext;
 use App\Jobs\ProcessDataImportChunk;
+use App\Jobs\ValidateDataImport;
 use App\Models\Company;
 use App\Models\Contact;
 use App\Models\DataImport;
@@ -1289,6 +1290,8 @@ class DataImportTest extends TestCase
 
     public function test_company_validation_rejects_analysis_when_duplicate_decisions_change_concurrently(): void
     {
+        Bus::fake();
+        config(['queue.default' => 'redis']);
         Storage::fake('local');
 
         $organization = Organization::factory()->create();
@@ -1322,6 +1325,7 @@ class DataImportTest extends TestCase
         ])->assertRedirect('/imports/'.$importId);
         $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
             ->assertRedirect('/imports/'.$importId);
+        app()->call([new ValidateDataImport($organization->id, $importId, 1), 'handle']);
         $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/resolutions', [
             'resolutions' => ['2' => ['action' => 'create']],
         ])->assertRedirect('/imports/'.$importId);
@@ -1341,9 +1345,10 @@ class DataImportTest extends TestCase
         $this->app->instance(CompanyImportService::class, $concurrentCompanyImports);
 
         $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
-            ->assertSessionHasErrors('file');
+            ->assertRedirect('/imports/'.$importId);
+        app()->call([new ValidateDataImport($organization->id, $importId, 1), 'handle']);
 
-        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'status' => 'mapped']);
+        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'status' => 'validation_failed']);
         $this->assertDatabaseCount('data_import_rows', 0);
     }
 
@@ -2193,6 +2198,7 @@ class DataImportTest extends TestCase
                     'rows' => [['Nova empresa']],
                     'totalRows' => 1,
                     'malformedRows' => [],
+                    'complete' => true,
                 ];
             },
         );
@@ -2241,6 +2247,7 @@ class DataImportTest extends TestCase
         ])->assertRedirect('/imports/'.$importId);
         $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
             ->assertRedirect('/imports/'.$importId);
+        app()->call([new ValidateDataImport($organization->id, $importId, 1), 'handle']);
         $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
             ->assertRedirect('/imports/'.$importId);
 
@@ -2280,12 +2287,12 @@ class DataImportTest extends TestCase
         $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/mapping', [
             'mapping' => ['name' => '0'],
         ])->assertRedirect('/imports/'.$importId);
-        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/validate')
-            ->assertRedirect('/imports/'.$importId);
-        $this->actingAs($owner)->withSession($session)->post('/imports/'.$importId.'/confirm')
+        $this->from('/imports/'.$importId)->actingAs($owner)->withSession($session)
+            ->post('/imports/'.$importId.'/validate')
+            ->assertRedirect('/imports/'.$importId)
             ->assertSessionHasErrors('file');
 
-        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'status' => 'validated']);
+        $this->assertDatabaseHas('data_imports', ['id' => $importId, 'status' => 'mapped']);
         $this->assertDatabaseCount('companies', 0);
         Bus::assertNothingDispatched();
     }
@@ -2889,7 +2896,7 @@ class DataImportTest extends TestCase
                 ->where('preview', null));
     }
 
-    public function test_preview_rejects_a_file_that_exceeds_the_row_limit(): void
+    public function test_preview_limits_large_files_to_a_small_sample_before_queued_validation(): void
     {
         Storage::fake('local');
 
@@ -2919,8 +2926,10 @@ class DataImportTest extends TestCase
             ->assertOk()
             ->assertInertia(fn ($page) => $page
                 ->component('imports/show')
-                ->where('fileError', 'O arquivo ultrapassa o limite de 5.000 linhas. Divida a planilha em arquivos menores.')
-                ->where('preview', null));
+                ->where('fileError', null)
+                ->where('preview.complete', false)
+                ->where('preview.totalRows', 11)
+                ->has('preview.rows', 10));
     }
 
     public function test_a_salesperson_cannot_preview_an_import_created_by_another_salesperson(): void
